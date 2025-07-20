@@ -213,3 +213,11 @@ class CehrGPTArguments:
         default=1 / 1000,
         metadata={"help": "The min_prevalence to keep the concepts in the tokenizer"},
     )
+    model_size_only: Optional[bool] = dataclasses.field(
+        default=False,
+        metadata={"help": "A flag to indicate whether we want to compute model size only."},
+    )
+    memory_fraction: Optional[float] = dataclasses.field(
+        default=1.0,
+        metadata={"help": "The memory fraction to set for the GPU."},
+    )

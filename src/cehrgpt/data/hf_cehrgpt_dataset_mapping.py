@@ -450,6 +450,7 @@ class HFFineTuningMapping(HFCehrGptTokenizationMapping):
 
     def transform(self, record: Dict[str, Any]) -> Dict[str, Any]:
         record = super().transform(record)
+        print(record)
         record.update(
             {
                 "age_at_index": (

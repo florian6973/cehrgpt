@@ -42,6 +42,7 @@ from cehrgpt.runners.sample_packing_trainer import SamplePackingTrainer
 LOG = logging.get_logger("transformers")
 
 
+
 class CustomEarlyStoppingCallback(EarlyStoppingCallback):
     def check_metric_value(self, args, state, control, metric_value):
         # best_metric is set by code for load_best_model
@@ -234,7 +235,12 @@ def load_and_create_model(
 
 
 def main():
+    torch.cuda.reset_peak_memory_stats()
+
     cehrgpt_args, data_args, model_args, training_args = parse_runner_args()
+
+    if cehrgpt_args.memory_fraction < 1.0:
+        torch.cuda.set_per_process_memory_fraction(cehrgpt_args.memory_fraction, 0) # 0.3*95 = 28.5GB
 
     if cehrgpt_args.sample_packing and data_args.streaming:
         raise RuntimeError(
@@ -469,6 +475,12 @@ def main():
         processed_dataset = processed_dataset.filter(filter_func, **filter_args)
 
     model = load_and_create_model(model_args, cehrgpt_args, cehrgpt_tokenizer)
+    # print number of parameters
+    model_size = sum(p.numel() for p in model.parameters())
+    print(f"Number of parameters: {model_size}, number of layers: {model.config.num_hidden_layers}, hidden size: {model.config.hidden_size}")
+    if cehrgpt_args.model_size_only:
+        print(model_size)
+        return model_size
 
     # Try to update motor tte vocab size if the new configuration is different from the existing one
     if cehrgpt_args.include_motor_time_to_event:
@@ -576,6 +588,8 @@ def main():
     trainer.log_metrics("train", metrics)
     trainer.save_metrics("train", metrics)
     trainer.save_state()
+
+    print(f"Peak memory usage: {torch.cuda.max_memory_allocated() / 1024 ** 2:.2f} MB")
 
 
 if __name__ == "__main__":

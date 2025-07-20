@@ -59,8 +59,8 @@ if __name__ == "__main__":
     )
     torch_dtype = get_torch_dtype(model_args.torch_dtype)
     cehrgpt_model = (
-        CEHRGPT2Model.from_pretrained(
-        # CEHRGPT2LMHeadModel.from_pretrained(
+        # CEHRGPT2Model.from_pretrained(
+        CEHRGPT2LMHeadModel.from_pretrained(
             model_args.model_name_or_path,
             attn_implementation=(
                 "flash_attention_2" if is_flash_attn_2_available() else "eager"
@@ -126,11 +126,20 @@ if __name__ == "__main__":
             else model_args.max_position_embeddings
         ),
         include_values=cehrgpt_model.config.include_values,
-        pretraining=False,  # Changed to True to enable labels for loss computation
-        include_ttv_prediction=False,
-        use_sub_time_tokenization=False,
+        pretraining=True,  # Changed to True to enable labels for loss computation
+        # include_ttv_prediction=False,
+        # use_sub_time_tokenization=False,
         include_demographics=cehrgpt_args.include_demographics,
         add_linear_prob_token=True,
+
+
+
+        include_ttv_prediction=model_args.include_ttv_prediction,
+        use_sub_time_tokenization=model_args.use_sub_time_tokenization,
+        # include_values=model_args.include_values,
+        include_motor_time_to_event=cehrgpt_args.include_motor_time_to_event,
+        motor_tte_vocab_size=cehrgpt_model.config.motor_tte_vocab_size,
+        motor_num_time_pieces=cehrgpt_args.motor_num_time_pieces,
     )
 
     train_loader = DataLoader(
@@ -204,15 +213,19 @@ if __name__ == "__main__":
                     **batch, output_attentions=False, output_hidden_states=False
                 )
 
-                # print(cehrgpt_output)
-                # print(cehrgpt_output.loss)
+                print(cehrgpt_output)
+                print(cehrgpt_output.loss)
                 # should separate samples, issue, loss per person
                 # check which patient is being used?
                 # only one loss
                 # exit()
-                # losses.append(cehrgpt_output.loss.item())
-                # print(min(losses), max(losses), np.mean(losses))
-                # continue
+                losses.append(cehrgpt_output.loss.item())
+                print(min(losses), max(losses), np.mean(losses))
+
+                if len(losses) > 100:
+                    np.save(os.path.join(training_args.output_dir, "losses-test.npy"), losses)
+                    exit()
+                continue
                 
                 if cehrgpt_args.sample_packing:
                     if cehrgpt_args.average_over_sequence:
