@@ -1,15 +1,14 @@
+import datetime
 import glob
 import os
 import shutil
 import uuid
-from datetime import datetime
 from functools import partial
 from pathlib import Path
 from typing import Optional, Union
 
 import numpy as np
 import pandas as pd
-import polars as pl
 import torch
 import torch.distributed as dist
 from cehrbert.data_generators.hf_data_generator.meds_utils import CacheFileCollector
@@ -25,7 +24,6 @@ from cehrgpt.data.hf_cehrgpt_dataset_collator import (
     CehrGptDataCollator,
     SamplePackingCehrGptDataCollator,
 )
-from cehrgpt.data.hf_cehrgpt_dataset_mapping import ExtractTokenizedSequenceDataMapping
 from cehrgpt.data.sample_packing_sampler import SamplePackingBatchSampler
 from cehrgpt.models.hf_cehrgpt import (
     CEHRGPT2Model,
@@ -159,24 +157,7 @@ def main():
                 final_splits = prepare_finetune_dataset(
                     data_args, training_args, cehrgpt_args, cache_file_collector
                 )
-                if cehrgpt_args.expand_tokenizer:
-                    new_tokenizer_path = os.path.expanduser(training_args.output_dir)
-                    if tokenizer_exists(new_tokenizer_path):
-                        cehrgpt_tokenizer = CehrGptTokenizer.from_pretrained(
-                            new_tokenizer_path
-                        )
-                    else:
-                        cehrgpt_tokenizer = CehrGptTokenizer.expand_trained_tokenizer(
-                            cehrgpt_tokenizer=cehrgpt_tokenizer,
-                            dataset=final_splits["train"],
-                            data_args=data_args,
-                            concept_name_mapping={},
-                        )
-                        cehrgpt_tokenizer.save_pretrained(
-                            os.path.expanduser(training_args.output_dir)
-                        )
-
-                    # TODO: temp solution, this column is mixed typed and causes an issue when transforming the data
+                # TODO: temp solution, this column is mixed typed and causes an issue when transforming the data
                 if not data_args.streaming:
                     all_columns = final_splits["train"].column_names
                     if "visit_concept_ids" in all_columns:
@@ -238,10 +219,6 @@ def main():
             len(processed_dataset["test"]),
         )
 
-    LOG.info(f"cehrgpt_model.config.vocab_size: {cehrgpt_model.config.vocab_size}")
-    LOG.info(f"cehrgpt_tokenizer.vocab_size: {cehrgpt_tokenizer.vocab_size}")
-    if cehrgpt_model.config.vocab_size < cehrgpt_tokenizer.vocab_size:
-        cehrgpt_model.resize_token_embeddings(cehrgpt_tokenizer.vocab_size)
     if (
         cehrgpt_model.config.max_position_embeddings
         < model_args.max_position_embeddings
@@ -339,10 +316,12 @@ def main():
                 for data_dir in [data_args.data_folder, data_args.test_data_folder]
             ]
         )
-        # This is a pre-caution in case the index_date is not a datetime type
-        demographics_df["index_date"] = pd.to_datetime(
-            demographics_df["index_date"]
-        ).dt.date
+
+        demographics_df["index_date"] = (
+            demographics_df["index_date"].dt.tz_localize("UTC")
+            - datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
+        ).dt.total_seconds()
+
         demographics_dict = {
             (row["person_id"], row["index_date"]): {
                 "gender_concept_id": row["gender_concept_id"],
@@ -379,9 +358,16 @@ def main():
                 prediction_time_posix = batch.pop("index_date").numpy().squeeze()
                 if prediction_time_posix.ndim == 0:
                     prediction_time_posix = np.asarray([prediction_time_posix])
+
                 prediction_time = list(
-                    map(datetime.fromtimestamp, prediction_time_posix)
+                    map(
+                        lambda posix_time: datetime.datetime.utcfromtimestamp(
+                            posix_time
+                        ).replace(tzinfo=None),
+                        prediction_time_posix,
+                    )
                 )
+
                 labels = (
                     batch.pop("classifier_label")
                     .float()

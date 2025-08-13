@@ -47,7 +47,7 @@ def prepare_finetune_dataset(
     data_args: DataTrainingArguments,
     training_args: TrainingArguments,
     cehrgpt_args: CehrGPTArguments,
-    cache_file_collector: CacheFileCollector,
+    cache_file_collector: Optional[CacheFileCollector] = None,
 ) -> DatasetDict:
     # If the data is in the MEDS format, we need to convert it to the CEHR-BERT format
     if data_args.is_data_in_meds:
@@ -91,8 +91,9 @@ def prepare_finetune_dataset(
                     "Clean up the cached files for the cehrgpt dataset transformed from the MEDS: %s",
                     stats,
                 )
-                # Clean up the files created from the data generator
-                cache_file_collector.remove_cache_files()
+                if cache_file_collector:
+                    # Clean up the files created from the data generator
+                    cache_file_collector.remove_cache_files()
                 dataset = load_from_disk(str(meds_extension_path))
 
         train_set = dataset["train"]
@@ -271,7 +272,7 @@ def create_dataset_splits(data_args: DataTrainingArguments, seed: int):
 def extract_cohort_sequences(
     data_args: DataTrainingArguments,
     cehrgpt_args: CehrGPTArguments,
-    cache_file_collector: CacheFileCollector,
+    cache_file_collector: Optional[CacheFileCollector] = None,
 ) -> DatasetDict:
     """
     Extracts and processes cohort-specific tokenized sequences from a pre-tokenized dataset,.
@@ -309,9 +310,18 @@ def extract_cohort_sequences(
             mapping={
                 "prediction_time": "index_date",
                 "subject_id": "person_id",
+                "boolean_value": "label",
             }
         )
     all_person_ids = cohort["person_id"].unique().to_list()
+    # In case the label column does not exist, we add a fake column to the dataframe so subsequent process can work
+    if "label" not in cohort.columns:
+        cohort = cohort.with_columns(
+            pl.Series(
+                name="label", values=np.zeros_like(cohort["person_id"].to_numpy())
+            )
+        )
+
     # data_args.observation_window
     tokenized_dataset = load_from_disk(cehrgpt_args.tokenized_full_dataset_path)
     filtered_tokenized_dataset = tokenized_dataset.filter(
@@ -353,6 +363,7 @@ def extract_cohort_sequences(
         num_proc=data_args.preprocessing_num_workers,
         remove_columns=filtered_tokenized_dataset["train"].column_names,
     )
-    cache_file_collector.add_cache_files(filtered_tokenized_dataset)
-    cache_file_collector.add_cache_files(processed_dataset)
+    if cache_file_collector:
+        cache_file_collector.add_cache_files(filtered_tokenized_dataset)
+        cache_file_collector.add_cache_files(processed_dataset)
     return processed_dataset
