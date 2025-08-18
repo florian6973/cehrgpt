@@ -9,11 +9,15 @@ from typing import Optional, Union
 
 import numpy as np
 import pandas as pd
+import polars as pl
 import torch
 import torch.distributed as dist
 from cehrbert.data_generators.hf_data_generator.meds_utils import CacheFileCollector
 from cehrbert.runners.runner_util import generate_prepared_ds_path
 from datasets import concatenate_datasets, load_from_disk
+from torch.distributed.algorithms.ddp_comm_hooks.powerSGD_hook import (
+    batched_powerSGD_hook,
+)
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers.trainer_utils import is_main_process
@@ -241,7 +245,6 @@ def main():
             SamplePackingCehrGptDataCollator,
             cehrgpt_args.max_tokens_per_batch,
             cehrgpt_model.config.max_position_embeddings,
-            add_end_token_in_sample_packing=cehrgpt_args.add_end_token_in_sample_packing,
         )
         train_batch_sampler = SamplePackingBatchSampler(
             lengths=train_set["num_of_concepts"],
@@ -332,7 +335,7 @@ def main():
 
     data_loaders = [("train", train_loader), ("test", test_dataloader)]
 
-    ve_token_id = cehrgpt_tokenizer._convert_token_to_id("[VE]")
+    ve_token_id = cehrgpt_tokenizer.ve_token_id
     for split, data_loader in data_loaders:
         # Ensure prediction folder exists
         feature_output_folder = (
@@ -382,6 +385,9 @@ def main():
                 # Right now the model does not support this column, we need to pop it
                 if "epoch_times" in batch:
                     batch.pop("epoch_times")
+
+                if "ages" in batch:
+                    batch.pop("ages")
 
                 batch = {k: v.to(device) for k, v in batch.items()}
                 # Forward pass
