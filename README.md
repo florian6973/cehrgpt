@@ -47,7 +47,7 @@ mkdir $CEHR_GPT_DATA_DIR/dataset_prepared
 
 ## 🏗️ Model Training
 
-### Step 1: Generate Pre-training Data
+### Step 1: Generate Pre-training Data from OMOP
 
 Generate the training data following the [Data Generation Instruction](./data_generation.md).
 
@@ -67,7 +67,7 @@ python -u -m cehrgpt.runners.hf_cehrgpt_pretrain_runner \
   --hidden_size 768 --num_hidden_layers 14 --max_position_embeddings 4096 \
   --evaluation_strategy epoch --save_strategy epoch \
   --sample_packing --max_tokens_per_batch 16384 \
-  --warmup_steps 0.01 --weight_decay 0.01 \
+  --warmup_ratio 0.01 --weight_decay 0.01 \
   --num_train_epochs 50 --learning_rate 0.0002 \
   --use_early_stopping --early_stopping_threshold 0.001
 ```

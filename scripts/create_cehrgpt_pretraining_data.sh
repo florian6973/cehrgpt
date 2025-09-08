@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 
 # Function to display usage
 usage() {
@@ -24,29 +24,54 @@ INPUT_FOLDER=""
 OUTPUT_FOLDER=""
 START_DATE=""
 
-# Domain tables (fixed list)
-DOMAIN_TABLES=("condition_occurrence" "procedure_occurrence" "drug_exposure")
+# Domain tables (sh-compatible - space-separated string)
+DOMAIN_TABLES="condition_occurrence procedure_occurrence drug_exposure"
 
-# Parse command line arguments
-ARGS=$(getopt -o "" --long input_folder:,output_folder:,start_date:,help -n "$0" -- "$@")
-
-if [ $? -ne 0 ]; then
-    usage
-fi
-
-eval set -- "$ARGS"
-
-while true; do
-    case "$1" in
+# Parse command line arguments without getopt
+while [ $# -gt 0 ]; do
+    case $1 in
         --input_folder)
+            if [ -z "$2" ]; then
+                echo "Error: --input_folder requires a value"
+                usage
+            fi
+            # Check if next argument starts with --
+            case "$2" in
+                --*)
+                    echo "Error: --input_folder requires a value"
+                    usage
+                    ;;
+            esac
             INPUT_FOLDER="$2"
             shift 2
             ;;
         --output_folder)
+            if [ -z "$2" ]; then
+                echo "Error: --output_folder requires a value"
+                usage
+            fi
+            # Check if next argument starts with --
+            case "$2" in
+                --*)
+                    echo "Error: --output_folder requires a value"
+                    usage
+                    ;;
+            esac
             OUTPUT_FOLDER="$2"
             shift 2
             ;;
         --start_date)
+            if [ -z "$2" ]; then
+                echo "Error: --start_date requires a value"
+                usage
+            fi
+            # Check if next argument starts with --
+            case "$2" in
+                --*)
+                    echo "Error: --start_date requires a value"
+                    usage
+                    ;;
+            esac
             START_DATE="$2"
             shift 2
             ;;
@@ -57,9 +82,13 @@ while true; do
             shift
             break
             ;;
+        -*)
+            echo "Error: Unknown option $1"
+            usage
+            ;;
         *)
-            echo "Internal error!"
-            exit 1
+            echo "Error: Unexpected argument $1"
+            usage
             ;;
     esac
 done
@@ -70,22 +99,50 @@ if [ -z "$INPUT_FOLDER" ] || [ -z "$OUTPUT_FOLDER" ] || [ -z "$START_DATE" ]; th
     usage
 fi
 
+# Check if input folder exists
+if [ ! -d "$INPUT_FOLDER" ]; then
+    echo "Error: Input folder '$INPUT_FOLDER' does not exist"
+    exit 1
+fi
+
 # Create output folder if it doesn't exist
 mkdir -p "$OUTPUT_FOLDER"
 
+echo "Starting CEHR-GPT preprocessing with:"
+echo "  Input folder: $INPUT_FOLDER"
+echo "  Output folder: $OUTPUT_FOLDER"
+echo "  Start date: $START_DATE"
+echo ""
+
+export CEHRBERT_DATA_HOME=$(python -c "import cehrbert_data; print(cehrbert_data.__file__.rsplit('/', 1)[0])")
+
+# Check if SPARK_SUBMIT_OPTIONS is set and not empty
+if [ -n "$SPARK_SUBMIT_OPTIONS" ]; then
+    SPARK_OPTIONS="$SPARK_SUBMIT_OPTIONS"
+    echo "Using Spark options: $SPARK_OPTIONS"
+else
+    SPARK_OPTIONS=""
+    echo "No Spark options specified"
+fi
+
 # Step 1: Generate included concept list
-CONCEPT_LIST_CMD="python -u -m cehrbert_data.apps.generate_included_concept_list \
+CONCEPT_LIST_CMD="spark-submit $SPARK_OPTIONS $CEHRBERT_DATA_HOME/apps/generate_included_concept_list.py \
 -i \"$INPUT_FOLDER\" \
 -o \"$OUTPUT_FOLDER\" \
 --min_num_of_patients 100 \
---ehr_table_list ${DOMAIN_TABLES[@]}"
+--ehr_table_list $DOMAIN_TABLES"
 
 echo "Running concept list generation:"
 echo "$CONCEPT_LIST_CMD"
 eval "$CONCEPT_LIST_CMD"
 
+if [ $? -ne 0 ]; then
+    echo "Error: Concept list generation failed"
+    exit 1
+fi
+
 # Step 2: Generate training data
-TRAINING_DATA_CMD="python -m cehrbert_data.apps.generate_training_data \
+TRAINING_DATA_CMD="spark-submit $SPARK_OPTIONS $CEHRBERT_DATA_HOME/apps/generate_training_data.py \
 --input_folder \"$INPUT_FOLDER\" \
 --output_folder \"$OUTPUT_FOLDER\" \
 -d $START_DATE \
@@ -94,12 +151,18 @@ TRAINING_DATA_CMD="python -m cehrbert_data.apps.generate_training_data \
 -iv \
 -ip \
 --include_concept_list \
---include_death \
 --gpt_patient_sequence \
 --should_construct_artificial_visits \
 --disconnect_problem_list_records \
---domain_table_list ${DOMAIN_TABLES[@]}"
+--domain_table_list $DOMAIN_TABLES"
 
 echo "Running training data generation:"
 echo "$TRAINING_DATA_CMD"
 eval "$TRAINING_DATA_CMD"
+
+if [ $? -ne 0 ]; then
+    echo "Error: Training data generation failed"
+    exit 1
+fi
+
+echo "CEHR-GPT preprocessing completed successfully!"
