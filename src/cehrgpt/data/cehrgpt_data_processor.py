@@ -207,13 +207,20 @@ class CehrGptDataProcessor(DatasetMapping):
         record["ages"] = np.concatenate(
             [
                 (
-                    np.full([DEMOGRAPHIC_PROMPT_SIZE], record["ages"][0])
+                    np.full(
+                        [DEMOGRAPHIC_PROMPT_SIZE],
+                        record["ages"][0] if len(record["ages"]) > 0 else 0,
+                    )
                     if demographic_tokens is not None
                     else self.empty_array
                 ),
                 np.asarray(record["ages"][start_index:end_index]),
                 (
-                    np.asarray([record["ages"][-1]])
+                    (
+                        np.asarray([record["ages"][-1]])
+                        if len(record["ages"]) > 0
+                        else self.empty_array
+                    )
                     if add_last_token
                     else self.empty_array
                 ),
@@ -224,13 +231,24 @@ class CehrGptDataProcessor(DatasetMapping):
         record["epoch_times"] = np.concatenate(
             [
                 (
-                    np.zeros([DEMOGRAPHIC_PROMPT_SIZE])
+                    np.full(
+                        [DEMOGRAPHIC_PROMPT_SIZE],
+                        (
+                            record["epoch_times"][0]
+                            if len(record["epoch_times"]) > 0
+                            else 0
+                        ),
+                    )
                     if demographic_tokens is not None
                     else self.empty_array
                 ),
                 np.asarray(record["epoch_times"][start_index:end_index]),
                 (
-                    np.asarray([record["epoch_times"][-1]])
+                    (
+                        np.asarray([record["epoch_times"][-1]])
+                        if len(record["epoch_times"]) > 0
+                        else self.empty_array
+                    )
                     if add_last_token
                     else self.empty_array
                 ),
