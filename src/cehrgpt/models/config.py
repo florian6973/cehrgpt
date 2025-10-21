@@ -106,6 +106,8 @@ class CEHRGPTConfig(PretrainedConfig):
         n_head=12,
         n_inner=None,
         activation_function="gelu_new",
+        decoder_mlp="GPT2MLP",
+        mlp_bias=False,
         resid_pdrop=0.1,
         embd_pdrop=0.1,
         attn_pdrop=0.1,
@@ -121,10 +123,9 @@ class CEHRGPTConfig(PretrainedConfig):
         bos_token_id=50256,
         eos_token_id=50256,
         lab_token_ids=None,
-        ve_token_id=None,
         scale_attn_by_inverse_layer_idx=False,
         reorder_and_upcast_attn=False,
-        exclude_position_ids=False,
+        apply_rotary=False,
         include_values=False,
         value_vocab_size=None,
         include_ttv_prediction=False,
@@ -149,6 +150,7 @@ class CEHRGPTConfig(PretrainedConfig):
         entropy_penalty=False,
         entropy_penalty_alpha=0.01,
         sample_packing_max_positions=None,
+        class_weights=None,
         **kwargs,
     ):
         if token_to_time_token_mapping is None:
@@ -168,6 +170,8 @@ class CEHRGPTConfig(PretrainedConfig):
         self.n_head = n_head
         self.n_inner = n_inner
         self.activation_function = activation_function
+        self.decoder_mlp = decoder_mlp
+        self.mlp_bias = mlp_bias
         self.resid_pdrop = resid_pdrop
         self.embd_pdrop = embd_pdrop
         self.attn_pdrop = attn_pdrop
@@ -187,7 +191,7 @@ class CEHRGPTConfig(PretrainedConfig):
         self.eos_token_id = eos_token_id
         self.lab_token_ids = lab_token_ids
 
-        self.exclude_position_ids = exclude_position_ids
+        self.apply_rotary = apply_rotary
         self.include_values = include_values
         self.value_vocab_size = value_vocab_size
 
@@ -205,11 +209,6 @@ class CEHRGPTConfig(PretrainedConfig):
             and self.motor_tte_vocab_size
             and self.motor_tte_vocab_size > 0
         )
-        if self.include_motor_time_to_event and not ve_token_id:
-            raise RuntimeError(
-                f"ve_token_id must be provided when include_motor_time_to_event is True"
-            )
-        self.ve_token_id = ve_token_id
         self.motor_time_to_event_weight = motor_time_to_event_weight
         self.motor_num_time_pieces = motor_num_time_pieces
 
@@ -226,6 +225,9 @@ class CEHRGPTConfig(PretrainedConfig):
         self.entropy_penalty = entropy_penalty
         self.entropy_penalty_alpha = entropy_penalty_alpha
         self.value_prediction_loss_weight = value_prediction_loss_weight
+
+        # Class weights for fine-tuning
+        self.class_weights = class_weights
 
         kwargs["tie_word_embeddings"] = not use_pretrained_embeddings
 

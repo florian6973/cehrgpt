@@ -1,7 +1,12 @@
 import random
 import re
-from datetime import date, timedelta
-from typing import List, Sequence, Tuple
+from datetime import date, datetime, timedelta, timezone
+from typing import List, Optional, Sequence, Tuple, Union
+
+import numpy as np
+from cehrbert_data.const.artificial_tokens import DEATH_TOKEN
+from meds import death_code
+from transformers.utils import logging
 
 from cehrgpt.cehrgpt_args import SamplingStrategy
 from cehrgpt.models.special_tokens import (
@@ -14,6 +19,7 @@ from cehrgpt.models.special_tokens import (
 MEDS_CODE_PATTERN = re.compile(r".*/.*")
 INPATIENT_ATT_PATTERN = re.compile(r"(?:VS-|i-)D(\d+)(?:-VE)?")
 DEMOGRAPHIC_PROMPT_SIZE = 4
+logger = logging.get_logger("transformers")
 
 
 class RandomSampleCache:
@@ -60,6 +66,74 @@ class RandomSampleCache:
                     random.choices(self._data_indices, k=self._cache_size)
                 )
         return self._cache.pop()
+
+
+def construct_time_sequence(
+    concept_ids: List[str], epoch_times: Optional[List[Union[int, float]]] = None
+) -> List[float]:
+    if epoch_times is not None:
+        return epoch_times
+
+    if concept_ids[0].lower().startswith("year"):
+        year_str = concept_ids[0].split(":")[1]
+    else:
+        year_str = "1985"
+
+    datetime_cursor = datetime(
+        int(year_str), month=1, day=1, hour=0, minute=0, second=0
+    ).replace(tzinfo=timezone.utc)
+    epoch_times = []
+    for concept_id in concept_ids:
+        if is_att_token(concept_id):
+            att_days = extract_time_interval_in_days(concept_id)
+            datetime_cursor += timedelta(days=att_days)
+        epoch_times.append(datetime_cursor.timestamp())
+    return epoch_times
+
+
+def construct_age_sequence(
+    concept_ids: List[str], ages: Optional[List[int]] = None
+) -> List[int]:
+    if ages is not None:
+        return ages
+    elif concept_ids[1].lower().startswith("age"):
+        age_str = concept_ids[1].split(":")[1]
+        try:
+            age = max(int(age_str), 0)
+        except ValueError:
+            logger.warning(
+                "Age is not an integer: %s. Setting it to default value 0", age_str
+            )
+            age = 0
+        ages = []
+        time_delta = 0
+        for concept_id in concept_ids:
+            if is_att_token(concept_id):
+                time_delta += extract_time_interval_in_days(concept_id)
+            ages.append(age + time_delta // 365)
+        return ages
+    else:
+        logger.warning(
+            "The second token is not a valid age token. The first 4 tokens are: %s. "
+            "Trying to fall back to ages, but it is not valid either %s. "
+            "Fall back to a zero vector [0, 0, 0, ...., 0]",
+            concept_ids[:4],
+            ages,
+        )
+        return np.zeros_like(concept_ids, dtype=int).tolist()
+
+
+def multiple_of_10(n: int) -> int:
+    return ((n // 10) + 1) * 10
+
+
+def encode_demographics(
+    age: int, gender: int, race: int, max_age=200, max_gender=10, max_race=10
+) -> int:
+    assert 0 <= age < max_age, f"age: {age}"
+    assert 0 <= gender < max_gender, f"gender: {gender}"
+    assert 0 <= race < max_race, f"race: {race}"
+    return age + max_age * gender + max_age * max_gender * race
 
 
 def collect_demographic_prompts_at_visits(patient_history: List[str]):
@@ -156,7 +230,7 @@ def random_slice_gpt_sequence(concept_ids, max_seq_len):
             )
         ):
             current_token = concept_ids[i]
-            if current_token == "VE":
+            if is_visit_end(current_token):
                 random_end_index = i
                 break
         return random_starting_index, random_end_index, demographic_tokens
@@ -198,6 +272,8 @@ def get_cehrgpt_output_folder(args, cehrgpt_tokenizer) -> str:
 def is_clinical_event(token: str, meds: bool = False) -> bool:
     if token.isnumeric():
         return True
+    if token in [DEATH_TOKEN, death_code]:
+        return True
     if meds:
         return bool(MEDS_CODE_PATTERN.match(token))
     return False
@@ -215,6 +291,18 @@ def is_visit_start(token: str):
 
 def is_visit_end(token: str) -> bool:
     return token in ["VE", "[VE]"]
+
+
+def is_inpatient_hour_token(token: str) -> bool:
+    return token.startswith("i-H")
+
+
+def extract_time_interval_in_hours(token: str) -> int:
+    try:
+        hour = int(token[3:])
+        return hour
+    except ValueError:
+        return 0
 
 
 def is_att_token(token: str):
@@ -256,6 +344,7 @@ def is_artificial_token(token: str) -> bool:
         return True
     if token == END_TOKEN:
         return True
+
     return False
 
 

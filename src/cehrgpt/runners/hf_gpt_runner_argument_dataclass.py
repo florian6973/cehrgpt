@@ -1,11 +1,35 @@
 import dataclasses
-from typing import List, Optional
+from typing import List, Literal, Optional
+
+from cehrgpt.models.gpt2 import ACT2FN
 
 
 @dataclasses.dataclass
 class CehrGPTArguments:
     """Arguments pertaining to what data we are going to input our model for training and eval."""
 
+    patient_splits_path: Optional[str] = dataclasses.field(
+        default=None,
+        metadata={"help": "Path to the patient splits file"},
+    )
+    tokenized_dataset_name: Optional[str] = dataclasses.field(
+        default=None,
+        metadata={"help": "The name of the dataset to use for tokenization."},
+    )
+    tokenized_full_dataset_path: Optional[str] = dataclasses.field(
+        default=None,
+        metadata={
+            "help": "The path to the tokenized dataset created for the full population"
+        },
+    )
+    activation_function: Literal[tuple(ACT2FN.keys())] = dataclasses.field(
+        default="gelu_new",
+        metadata={"help": "The activation function to use"},
+    )
+    decoder_mlp: Literal["GPT2MLP", "LlamaMLP"] = dataclasses.field(
+        default="GPT2MLP",
+        metadata={"help": "The decoder MLP architecture"},
+    )
     include_inpatient_hour_token: Optional[bool] = dataclasses.field(
         default=True,
         metadata={"help": "Include inpatient hour token"},
@@ -38,15 +62,13 @@ class CehrGPTArguments:
             "help": "A flag to indicate whether we want to expand the tokenizer for fine-tuning."
         },
     )
-    few_shot_predict: Optional[bool] = dataclasses.field(
+    hyperparameter_tuning: Optional[bool] = dataclasses.field(
         default=False,
-        metadata={
-            "help": "A flag to indicate whether we want to use a few shots to train the model"
-        },
+        metadata={"help": "A flag to indicate if we want to do hyperparameter tuning."},
     )
-    n_shots: Optional[int] = dataclasses.field(
-        default=128,
-        metadata={"help": "The number of examples from the training set."},
+    hyperparameter_tuning_is_grid: Optional[bool] = dataclasses.field(
+        default=True,
+        metadata={"help": "A flag to indicate if we want to do hyperparameter tuning."},
     )
     hyperparameter_tuning_percentage: Optional[float] = dataclasses.field(
         default=0.1,
@@ -60,10 +82,6 @@ class CehrGPTArguments:
             "help": "The number of trails will be use for hyperparameter tuning."
         },
     )
-    hyperparameter_tuning: Optional[bool] = dataclasses.field(
-        default=False,
-        metadata={"help": "A flag to indicate if we want to do hyperparameter tuning."},
-    )
     hyperparameter_batch_sizes: Optional[List[int]] = dataclasses.field(
         default_factory=lambda: [4, 8, 16],
         metadata={"help": "Hyperparameter search batch sizes"},
@@ -72,29 +90,13 @@ class CehrGPTArguments:
         default_factory=lambda: [10],
         metadata={"help": "Hyperparameter search num_train_epochs"},
     )
-    lr_low: Optional[float] = dataclasses.field(
-        default=1e-5,
-        metadata={
-            "help": "The lower bound of the learning rate range for hyperparameter tuning."
-        },
+    hyperparameter_learning_rates: Optional[List[int]] = dataclasses.field(
+        default_factory=lambda: [1e-5],
+        metadata={"help": "Hyperparameter search learning rates"},
     )
-    lr_high: Optional[float] = dataclasses.field(
-        default=5e-5,
-        metadata={
-            "help": "The upper bound of the learning rate range for hyperparameter tuning."
-        },
-    )
-    weight_decays_low: Optional[float] = dataclasses.field(
-        default=1e-3,
-        metadata={
-            "help": "The lower bound of the weight decays range for hyperparameter tuning."
-        },
-    )
-    weight_decays_high: Optional[float] = dataclasses.field(
-        default=1e-2,
-        metadata={
-            "help": "The upper bound of the weight decays range for hyperparameter tuning."
-        },
+    hyperparameter_weight_decays: Optional[List[int]] = dataclasses.field(
+        default_factory=lambda: [1e-2],
+        metadata={"help": "Hyperparameter search learning rates"},
     )
     causal_sfm: Optional[bool] = dataclasses.field(
         default=False,
@@ -162,6 +164,16 @@ class CehrGPTArguments:
             "help": "A threshold to denote how much the specified metric must improve to satisfy early stopping conditions."
         },
     )
+    inner_dim: Optional[int] = dataclasses.field(
+        default=None,
+        metadata={"help": "The dimensionality of the hidden layer"},
+    )
+    apply_rotary: Optional[bool] = dataclasses.field(
+        default=False,
+        metadata={
+            "help": "A flag to indicate whether we want to use rotary encoder layers"
+        },
+    )
     sample_packing: Optional[bool] = dataclasses.field(
         default=False,
         metadata={
@@ -170,12 +182,6 @@ class CehrGPTArguments:
     )
     max_tokens_per_batch: int = dataclasses.field(
         default=16384, metadata={"help": "Maximum number of tokens in each batch"}
-    )
-    add_end_token_in_sample_packing: Optional[bool] = dataclasses.field(
-        default=False,
-        metadata={
-            "help": "A flag to indicate whether we want to add end token in sample packing"
-        },
     )
     include_motor_time_to_event: Optional[bool] = dataclasses.field(
         default=False,
@@ -197,7 +203,17 @@ class CehrGPTArguments:
             "help": "The number of times each motor_num_time_pieces piece has to be"
         },
     )
-    concept_dir: Optional[str] = dataclasses.field(
+    motor_use_ontology: Optional[bool] = dataclasses.field(
+        default=False,
+        metadata={
+            "help": "A flag to indicate whether we want to use motor_use_ontology"
+        },
+    )
+    motor_sampling_probability: Optional[float] = dataclasses.field(
+        default=0.0,
+        metadata={"help": "A flag to indicate whether we want to use sample packing"},
+    )
+    vocab_dir: Optional[str] = dataclasses.field(
         default=None,
         metadata={"help": "The directory where the concept data is stored."},
     )
@@ -212,4 +228,26 @@ class CehrGPTArguments:
     min_prevalence: Optional[float] = dataclasses.field(
         default=1 / 1000,
         metadata={"help": "The min_prevalence to keep the concepts in the tokenizer"},
+    )
+    class_weights: Optional[List[int]] = dataclasses.field(
+        default=None,
+        metadata={"help": "The class weights for training"},
+    )
+    negative_sampling_probability: Optional[float] = dataclasses.field(
+        default=None,
+        metadata={
+            "help": "The probability of negative samples will be included in the training data"
+        },
+    )
+    num_of_trajectories_per_sample: Optional[int] = dataclasses.field(
+        default=1,
+        metadata={"help": "The number of trajectories per sample"},
+    )
+    generation_input_length: Optional[int] = dataclasses.field(
+        default=1024,
+        metadata={"help": "The length of the input sequence"},
+    )
+    generation_max_new_tokens: Optional[int] = dataclasses.field(
+        default=1024,
+        metadata={"help": "The maximum number of tokens in the generation sequence"},
     )

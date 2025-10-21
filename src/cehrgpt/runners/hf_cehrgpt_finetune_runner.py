@@ -1,3 +1,4 @@
+import glob
 import json
 import os
 import random
@@ -50,7 +51,11 @@ from cehrgpt.models.hf_cehrgpt import (
 )
 from cehrgpt.models.pretrained_embeddings import PretrainedEmbeddings
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
-from cehrgpt.runners.data_utils import get_torch_dtype, prepare_finetune_dataset
+from cehrgpt.runners.data_utils import (
+    extract_cohort_sequences,
+    get_torch_dtype,
+    prepare_finetune_dataset,
+)
 from cehrgpt.runners.gpt_runner_util import parse_runner_args
 from cehrgpt.runners.hf_cehrgpt_pretrain_runner import tokenizer_exists
 from cehrgpt.runners.hf_gpt_runner_argument_dataclass import CehrGPTArguments
@@ -160,15 +165,17 @@ def load_finetuned_model(
 def model_init(
     model_args: ModelArguments,
     training_args: TrainingArguments,
+    cehrgpt_args: CehrGPTArguments,
     tokenizer: CehrGptTokenizer,
 ):
     model = load_finetuned_model(
         model_args, training_args, model_args.model_name_or_path
     )
-    # Enable position embeddings when position embeddings are disabled in pre-training
-    if not model_args.exclude_position_ids and model.cehrgpt.exclude_position_ids:
-        LOG.info(f"Enable the position_embeddings")
-        model.cehrgpt.enable_position_embeddings()
+
+    if cehrgpt_args.class_weights:
+        model.config.class_weights = cehrgpt_args.class_weights
+        LOG.info(f"Setting class_weights to {model.config.class_weights}")
+
     if model.config.max_position_embeddings < model_args.max_position_embeddings:
         LOG.info(
             f"Increase model.config.max_position_embeddings to {model_args.max_position_embeddings}"
@@ -195,6 +202,7 @@ def model_init(
             model.cehrgpt.update_pretrained_embeddings(
                 tokenizer.pretrained_token_ids, tokenizer.pretrained_embeddings
             )
+
     # Expand value tokenizer to adapt to the fine-tuning dataset
     if model.config.include_values:
         if model.config.value_vocab_size < tokenizer.value_vocab_size:
@@ -252,46 +260,55 @@ def main():
 
     if processed_dataset is None:
         if is_main_process(training_args.local_rank):
-            final_splits = prepare_finetune_dataset(
-                data_args, training_args, cehrgpt_args, cache_file_collector
-            )
-            if cehrgpt_args.expand_tokenizer:
-                new_tokenizer_path = os.path.expanduser(training_args.output_dir)
-                if tokenizer_exists(new_tokenizer_path):
-                    tokenizer = CehrGptTokenizer.from_pretrained(new_tokenizer_path)
-                else:
-                    # Try to use the defined pretrained embeddings if exists, Otherwise we default to the pretrained model
-                    # embedded in the pretrained model
-                    pretrained_concept_embedding_model = PretrainedEmbeddings(
-                        cehrgpt_args.pretrained_embedding_path
-                    )
-                    if not pretrained_concept_embedding_model.exists:
-                        pretrained_concept_embedding_model = (
-                            tokenizer.pretrained_concept_embedding_model
+            # If the full dataset has been tokenized, we don't want to tokenize the cohort containing
+            # the subset of the data. We should slice out the portion of the tokenized sequences for each sample
+            if cehrgpt_args.tokenized_full_dataset_path is not None:
+                processed_dataset = extract_cohort_sequences(
+                    data_args, cehrgpt_args, cache_file_collector
+                )
+            else:
+                final_splits = prepare_finetune_dataset(
+                    data_args, training_args, cehrgpt_args, cache_file_collector
+                )
+                if cehrgpt_args.expand_tokenizer:
+                    new_tokenizer_path = os.path.expanduser(training_args.output_dir)
+                    if tokenizer_exists(new_tokenizer_path):
+                        tokenizer = CehrGptTokenizer.from_pretrained(new_tokenizer_path)
+                    else:
+                        # Try to use the defined pretrained embeddings if exists, Otherwise we default to the pretrained model
+                        # embedded in the pretrained model
+                        pretrained_concept_embedding_model = PretrainedEmbeddings(
+                            cehrgpt_args.pretrained_embedding_path
                         )
-                    tokenizer = CehrGptTokenizer.expand_trained_tokenizer(
-                        cehrgpt_tokenizer=tokenizer,
-                        dataset=final_splits["train"],
-                        data_args=data_args,
-                        concept_name_mapping={},
-                        pretrained_concept_embedding_model=pretrained_concept_embedding_model,
-                    )
-                    tokenizer.save_pretrained(
-                        os.path.expanduser(training_args.output_dir)
-                    )
+                        if not pretrained_concept_embedding_model.exists:
+                            pretrained_concept_embedding_model = (
+                                tokenizer.pretrained_concept_embedding_model
+                            )
+                        tokenizer = CehrGptTokenizer.expand_trained_tokenizer(
+                            cehrgpt_tokenizer=tokenizer,
+                            dataset=final_splits["train"],
+                            data_args=data_args,
+                            concept_name_mapping={},
+                            pretrained_concept_embedding_model=pretrained_concept_embedding_model,
+                        )
+                        tokenizer.save_pretrained(
+                            os.path.expanduser(training_args.output_dir)
+                        )
 
-            # TODO: temp solution, this column is mixed typed and causes an issue when transforming the data
-            if not data_args.streaming:
-                all_columns = final_splits["train"].column_names
-                if "visit_concept_ids" in all_columns:
-                    final_splits = final_splits.remove_columns(["visit_concept_ids"])
+                # TODO: temp solution, this column is mixed typed and causes an issue when transforming the data
+                if not data_args.streaming:
+                    all_columns = final_splits["train"].column_names
+                    if "visit_concept_ids" in all_columns:
+                        final_splits = final_splits.remove_columns(
+                            ["visit_concept_ids"]
+                        )
 
-            processed_dataset = create_cehrgpt_finetuning_dataset(
-                dataset=final_splits,
-                cehrgpt_tokenizer=tokenizer,
-                data_args=data_args,
-                cache_file_collector=cache_file_collector,
-            )
+                processed_dataset = create_cehrgpt_finetuning_dataset(
+                    dataset=final_splits,
+                    cehrgpt_tokenizer=tokenizer,
+                    data_args=data_args,
+                    cache_file_collector=cache_file_collector,
+                )
             if not data_args.streaming:
                 processed_dataset.save_to_disk(str(prepared_ds_path))
                 stats = processed_dataset.cleanup_cache_files()
@@ -323,21 +340,6 @@ def main():
     if not data_args.streaming and not cehrgpt_args.sample_packing:
         processed_dataset.set_format("pt")
 
-    if cehrgpt_args.few_shot_predict:
-        # At least we need two examples to have a validation set for early stopping
-        num_shots = max(cehrgpt_args.n_shots, 2)
-        random_train_indices = random.sample(
-            range(len(processed_dataset["train"])), k=num_shots
-        )
-        test_size = max(int(num_shots * data_args.validation_split_percentage), 1)
-        few_shot_train_val_set = processed_dataset["train"].select(random_train_indices)
-        train_val = few_shot_train_val_set.train_test_split(
-            test_size=test_size, seed=training_args.seed
-        )
-        few_shot_train_set, few_shot_val_set = train_val["train"], train_val["test"]
-        processed_dataset["train"] = few_shot_train_set
-        processed_dataset["validation"] = few_shot_val_set
-
     config = CEHRGPTConfig.from_pretrained(model_args.model_name_or_path)
     if config.max_position_embeddings < model_args.max_position_embeddings:
         config.max_position_embeddings = model_args.max_position_embeddings
@@ -350,6 +352,7 @@ def main():
             SamplePackingTrainer,
             max_tokens_per_batch=cehrgpt_args.max_tokens_per_batch,
             max_position_embeddings=config.max_position_embeddings,
+            negative_sampling_probability=cehrgpt_args.negative_sampling_probability,
         )
         training_args.per_device_train_batch_size = 1
         training_args.per_device_eval_batch_size = 1
@@ -357,7 +360,6 @@ def main():
             SamplePackingCehrGptDataCollator,
             cehrgpt_args.max_tokens_per_batch,
             config.max_position_embeddings,
-            add_end_token_in_sample_packing=cehrgpt_args.add_end_token_in_sample_packing,
         )
     else:
         trainer_class = Trainer
@@ -380,34 +382,47 @@ def main():
         include_ttv_prediction=False,
         use_sub_time_tokenization=False,
         include_demographics=cehrgpt_args.include_demographics,
+        add_linear_prob_token=True,
     )
 
     if training_args.do_train:
+        output_dir = training_args.output_dir
         if cehrgpt_args.hyperparameter_tuning:
-            training_args = perform_hyperparameter_search(
+            training_args, run_id = perform_hyperparameter_search(
                 trainer_class,
-                partial(model_init, model_args, training_args, tokenizer),
+                partial(model_init, model_args, training_args, cehrgpt_args, tokenizer),
                 processed_dataset,
                 data_collator,
                 training_args,
                 model_args,
                 cehrgpt_args,
             )
-
-        if cehrgpt_args.retrain_with_full:
-            # Always retrain with the full set when hyperparameter tuning is set to true
-            retrain_with_full_set(
-                trainer_class,
-                model_args,
-                training_args,
-                tokenizer,
-                processed_dataset,
-                data_collator,
+            # We enforce retraining if cehrgpt_args.hyperparameter_tuning_percentage < 1.0
+            cehrgpt_args.retrain_with_full |= (
+                cehrgpt_args.hyperparameter_tuning_percentage < 1.0
             )
+            output_dir = os.path.join(training_args.output_dir, f"run-{run_id}")
+
+        if cehrgpt_args.hyperparameter_tuning and not cehrgpt_args.retrain_with_full:
+            folders = glob.glob(os.path.join(output_dir, "checkpoint-*"))
+            if len(folders) == 0:
+                raise RuntimeError(
+                    f"There must be a checkpoint folder under {output_dir}"
+                )
+            checkpoint_dir = folders[0]
+            LOG.info("Best trial checkpoint folder: %s", checkpoint_dir)
+            for file_name in os.listdir(checkpoint_dir):
+                try:
+                    full_file_name = os.path.join(checkpoint_dir, file_name)
+                    destination = os.path.join(training_args.output_dir, file_name)
+                    if os.path.isfile(full_file_name):
+                        shutil.copy2(full_file_name, destination)
+                except Exception as e:
+                    LOG.error("Failed to copy %s: %s", file_name, str(e))
         else:
             # Initialize Trainer for final training on the combined train+val set
             trainer = trainer_class(
-                model=model_init(model_args, training_args, tokenizer),
+                model=model_init(model_args, training_args, cehrgpt_args, tokenizer),
                 data_collator=data_collator,
                 args=training_args,
                 train_dataset=processed_dataset["train"],
@@ -450,61 +465,6 @@ def main():
             batch_sampler=batch_sampler,
         )
         do_predict(test_dataloader, model_args, training_args, cehrgpt_args)
-
-
-def retrain_with_full_set(
-    trainer_class,
-    model_args: ModelArguments,
-    training_args: TrainingArguments,
-    tokenizer: CehrGptTokenizer,
-    dataset: DatasetDict,
-    data_collator: CehrGptDataCollator,
-) -> None:
-    """
-    Retrains a model on the full training and validation dataset for final performance evaluation.
-
-    This function consolidates the training and validation datasets into a single
-    dataset for final model training, updates the output directory for the final model,
-    and disables evaluation during training. It resumes from the latest checkpoint if available,
-    trains the model on the combined dataset, and saves the model along with training metrics
-    and state information.
-
-    Args:
-        trainer_class: Trainer or its subclass
-        model_args (ModelArguments): Model configuration and hyperparameters.
-        training_args (TrainingArguments): Training configuration, including output directory,
-                                           evaluation strategy, and other training parameters.
-        tokenizer (CehrGptTokenizer): Tokenizer instance specific to CEHR-GPT.
-        dataset (DatasetDict): A dictionary containing the 'train' and 'validation' datasets.
-        data_collator (CehrGptDataCollator): Data collator for handling data batching and tokenization.
-
-    Returns:
-        None
-    """
-    # Initialize Trainer for final training on the combined train+val set
-    full_dataset = concatenate_datasets([dataset["train"], dataset["validation"]])
-    training_args.output_dir = os.path.join(training_args.output_dir, "full")
-    LOG.info(
-        "Final output_dir for final_training_args.output_dir %s",
-        training_args.output_dir,
-    )
-    Path(training_args.output_dir).mkdir(exist_ok=True)
-    # Disable evaluation
-    training_args.evaluation_strategy = "no"
-    checkpoint = get_last_hf_checkpoint(training_args)
-    final_trainer = trainer_class(
-        model=model_init(model_args, training_args, tokenizer),
-        data_collator=data_collator,
-        args=training_args,
-        train_dataset=full_dataset,
-        tokenizer=tokenizer,
-    )
-    final_train_result = final_trainer.train(resume_from_checkpoint=checkpoint)
-    final_trainer.save_model()  # Saves the tokenizer too for easy upload
-    metrics = final_train_result.metrics
-    final_trainer.log_metrics("train", metrics)
-    final_trainer.save_metrics("train", metrics)
-    final_trainer.save_state()
 
 
 def do_predict(
@@ -554,7 +514,15 @@ def do_predict(
             index_dates = batch.pop("index_date").numpy().squeeze()
             if index_dates.ndim == 0:
                 index_dates = np.asarray([index_dates])
-            index_dates = list(map(datetime.fromtimestamp, index_dates.tolist()))
+
+            index_dates = list(
+                map(
+                    lambda posix_time: datetime.utcfromtimestamp(posix_time).replace(
+                        tzinfo=None
+                    ),
+                    index_dates.tolist(),
+                )
+            )
 
             batch = {k: v.to(device) for k, v in batch.items()}
             # Forward pass
@@ -618,9 +586,6 @@ def load_lora_model(
     # Enable include_values when include_values is set to be False during pre-training
     if model_args.include_values and not model.cehrgpt.include_values:
         model.cehrgpt.include_values = True
-    # Enable position embeddings when position embeddings are disabled in pre-training
-    if not model_args.exclude_position_ids and model.cehrgpt.exclude_position_ids:
-        model.cehrgpt.exclude_position_ids = False
     if cehrgpt_args.expand_tokenizer:
         tokenizer = CehrGptTokenizer.from_pretrained(training_args.output_dir)
         # Expand tokenizer to adapt to the finetuning dataset

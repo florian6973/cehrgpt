@@ -1,19 +1,23 @@
+import datetime
 import glob
 import os
 import shutil
 import uuid
-from datetime import datetime
 from functools import partial
 from pathlib import Path
 from typing import Optional, Union
 
 import numpy as np
 import pandas as pd
+import polars as pl
 import torch
 import torch.distributed as dist
 from cehrbert.data_generators.hf_data_generator.meds_utils import CacheFileCollector
 from cehrbert.runners.runner_util import generate_prepared_ds_path
 from datasets import concatenate_datasets, load_from_disk
+from torch.distributed.algorithms.ddp_comm_hooks.powerSGD_hook import (
+    batched_powerSGD_hook,
+)
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers.trainer_utils import is_main_process
@@ -31,7 +35,10 @@ from cehrgpt.models.hf_cehrgpt import (
 )
 from cehrgpt.models.special_tokens import LINEAR_PROB_TOKEN
 from cehrgpt.models.tokenization_hf_cehrgpt import CehrGptTokenizer
-from cehrgpt.runners.data_utils import prepare_finetune_dataset
+from cehrgpt.runners.data_utils import (
+    extract_cohort_sequences,
+    prepare_finetune_dataset,
+)
 from cehrgpt.runners.gpt_runner_util import parse_runner_args
 from cehrgpt.runners.hf_cehrgpt_pretrain_runner import tokenizer_exists
 
@@ -143,39 +150,31 @@ def main():
 
     if processed_dataset is None:
         if is_main_process(training_args.local_rank):
-            # Organize them into a single DatasetDict
-            final_splits = prepare_finetune_dataset(
-                data_args, training_args, cehrgpt_args, cache_file_collector
-            )
-            if cehrgpt_args.expand_tokenizer:
-                new_tokenizer_path = os.path.expanduser(training_args.output_dir)
-                if tokenizer_exists(new_tokenizer_path):
-                    cehrgpt_tokenizer = CehrGptTokenizer.from_pretrained(
-                        new_tokenizer_path
-                    )
-                else:
-                    cehrgpt_tokenizer = CehrGptTokenizer.expand_trained_tokenizer(
-                        cehrgpt_tokenizer=cehrgpt_tokenizer,
-                        dataset=final_splits["train"],
-                        data_args=data_args,
-                        concept_name_mapping={},
-                    )
-                    cehrgpt_tokenizer.save_pretrained(
-                        os.path.expanduser(training_args.output_dir)
-                    )
-
+            # If the full dataset has been tokenized, we don't want to tokenize the cohort containing
+            # the subset of the data. We should slice out the portion of the tokenized sequences for each sample
+            if cehrgpt_args.tokenized_full_dataset_path is not None:
+                processed_dataset = extract_cohort_sequences(
+                    data_args, cehrgpt_args, cache_file_collector
+                )
+            else:
+                # Organize them into a single DatasetDict
+                final_splits = prepare_finetune_dataset(
+                    data_args, training_args, cehrgpt_args, cache_file_collector
+                )
                 # TODO: temp solution, this column is mixed typed and causes an issue when transforming the data
-            if not data_args.streaming:
-                all_columns = final_splits["train"].column_names
-                if "visit_concept_ids" in all_columns:
-                    final_splits = final_splits.remove_columns(["visit_concept_ids"])
+                if not data_args.streaming:
+                    all_columns = final_splits["train"].column_names
+                    if "visit_concept_ids" in all_columns:
+                        final_splits = final_splits.remove_columns(
+                            ["visit_concept_ids"]
+                        )
 
-            processed_dataset = create_cehrgpt_finetuning_dataset(
-                dataset=final_splits,
-                cehrgpt_tokenizer=cehrgpt_tokenizer,
-                data_args=data_args,
-                cache_file_collector=cache_file_collector,
-            )
+                processed_dataset = create_cehrgpt_finetuning_dataset(
+                    dataset=final_splits,
+                    cehrgpt_tokenizer=cehrgpt_tokenizer,
+                    data_args=data_args,
+                    cache_file_collector=cache_file_collector,
+                )
             if not data_args.streaming:
                 processed_dataset.save_to_disk(prepared_ds_path)
                 processed_dataset.cleanup_cache_files()
@@ -224,10 +223,6 @@ def main():
             len(processed_dataset["test"]),
         )
 
-    LOG.info(f"cehrgpt_model.config.vocab_size: {cehrgpt_model.config.vocab_size}")
-    LOG.info(f"cehrgpt_tokenizer.vocab_size: {cehrgpt_tokenizer.vocab_size}")
-    if cehrgpt_model.config.vocab_size < cehrgpt_tokenizer.vocab_size:
-        cehrgpt_model.resize_token_embeddings(cehrgpt_tokenizer.vocab_size)
     if (
         cehrgpt_model.config.max_position_embeddings
         < model_args.max_position_embeddings
@@ -250,7 +245,6 @@ def main():
             SamplePackingCehrGptDataCollator,
             cehrgpt_args.max_tokens_per_batch,
             cehrgpt_model.config.max_position_embeddings,
-            add_end_token_in_sample_packing=cehrgpt_args.add_end_token_in_sample_packing,
         )
         train_batch_sampler = SamplePackingBatchSampler(
             lengths=train_set["num_of_concepts"],
@@ -325,10 +319,12 @@ def main():
                 for data_dir in [data_args.data_folder, data_args.test_data_folder]
             ]
         )
-        # This is a pre-caution in case the index_date is not a datetime type
-        demographics_df["index_date"] = pd.to_datetime(
-            demographics_df["index_date"]
-        ).dt.date
+
+        demographics_df["index_date"] = (
+            demographics_df["index_date"].dt.tz_localize("UTC")
+            - datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
+        ).dt.total_seconds()
+
         demographics_dict = {
             (row["person_id"], row["index_date"]): {
                 "gender_concept_id": row["gender_concept_id"],
@@ -339,7 +335,7 @@ def main():
 
     data_loaders = [("train", train_loader), ("test", test_dataloader)]
 
-    ve_token_id = cehrgpt_tokenizer._convert_token_to_id("[VE]")
+    ve_token_id = cehrgpt_tokenizer.ve_token_id
     for split, data_loader in data_loaders:
         # Ensure prediction folder exists
         feature_output_folder = (
@@ -365,9 +361,16 @@ def main():
                 prediction_time_posix = batch.pop("index_date").numpy().squeeze()
                 if prediction_time_posix.ndim == 0:
                     prediction_time_posix = np.asarray([prediction_time_posix])
+
                 prediction_time = list(
-                    map(datetime.fromtimestamp, prediction_time_posix)
+                    map(
+                        lambda posix_time: datetime.datetime.utcfromtimestamp(
+                            posix_time
+                        ).replace(tzinfo=None),
+                        prediction_time_posix,
+                    )
                 )
+
                 labels = (
                     batch.pop("classifier_label")
                     .float()
@@ -378,6 +381,13 @@ def main():
                 )
                 if labels.ndim == 0:
                     labels = np.asarray([labels])
+
+                # Right now the model does not support this column, we need to pop it
+                if "epoch_times" in batch:
+                    batch.pop("epoch_times")
+
+                if "ages" in batch:
+                    batch.pop("ages")
 
                 batch = {k: v.to(device) for k, v in batch.items()}
                 # Forward pass

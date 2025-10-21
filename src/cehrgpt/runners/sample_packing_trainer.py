@@ -1,9 +1,10 @@
 from typing import Optional, Union
 
+import torch
 from datasets import Dataset
 from torch.utils.data import DataLoader
 from transformers import Trainer
-from transformers.trainer_utils import has_length
+from transformers.trainer_utils import has_length, seed_worker
 from transformers.utils import import_utils, logging
 
 from cehrgpt.data.sample_packing_sampler import SamplePackingBatchSampler
@@ -35,6 +36,13 @@ class SamplePackingTrainer(Trainer):
                 self.max_tokens_per_batch,
             )
 
+        self.negative_sampling_probability = kwargs.pop(
+            "negative_sampling_probability", None
+        )
+        if self.negative_sampling_probability:
+            LOG.info(
+                "negative_sampling_probability: %s", self.negative_sampling_probability
+            )
         self.train_lengths = kwargs.pop("train_lengths", None)
         self.validation_lengths = kwargs.pop("validation_lengths", None)
         super().__init__(*args, **kwargs)
@@ -55,7 +63,10 @@ class SamplePackingTrainer(Trainer):
             if "num_of_concepts" in train_dataset.column_names:
                 lengths = train_dataset["num_of_concepts"]
             else:
-                lengths = [len(sample["input_ids"]) for sample in train_dataset]
+                lengths = [
+                    len(sample["input_ids"])
+                    for sample in train_dataset.select_columns("input_ids")
+                ]
 
             LOG.info("Finished computing lengths for the train dataset")
         else:
@@ -70,6 +81,14 @@ class SamplePackingTrainer(Trainer):
             data_collator = self._get_collator_with_removed_columns(
                 data_collator, description="training"
             )
+
+        labels = None
+        if (
+            self.negative_sampling_probability is not None
+            and "classifier_label" in train_dataset.column_names
+        ):
+            labels = train_dataset["classifier_label"]
+
         # Create our custom batch sampler
         batch_sampler = SamplePackingBatchSampler(
             lengths=lengths,
@@ -77,6 +96,8 @@ class SamplePackingTrainer(Trainer):
             max_position_embeddings=self.max_position_embeddings,
             drop_last=self.args.dataloader_drop_last,
             seed=self.args.seed,
+            negative_sampling_probability=self.negative_sampling_probability,
+            labels=labels,
         )
         dataloader_params = {
             "collate_fn": data_collator,
@@ -85,6 +106,11 @@ class SamplePackingTrainer(Trainer):
             "persistent_workers": self.args.dataloader_persistent_workers,
             "batch_sampler": batch_sampler,
         }
+        if not isinstance(train_dataset, torch.utils.data.IterableDataset):
+            dataloader_params["drop_last"] = self.args.dataloader_drop_last
+            dataloader_params["worker_init_fn"] = seed_worker
+            dataloader_params["prefetch_factor"] = self.args.dataloader_prefetch_factor
+
         return self.accelerator.prepare(DataLoader(train_dataset, **dataloader_params))
 
     def get_eval_dataloader(
