@@ -7,6 +7,8 @@ import threading
 import sys
 from typing import Dict, List
 import numpy as np
+import json
+
 try:
     import pynvml
     pynvml.nvmlInit()
@@ -195,7 +197,7 @@ parser.add_argument("--cuda_visible_devices", "-c", type=str, default="1")
 parser.add_argument("--hidden_size", "-hs", type=int, default=768)
 parser.add_argument("--hidden_size_multiplier", "-hsm", type=int, default=1)
 parser.add_argument("--num_hidden_layers", "-nl", type=int, default=14)
-parser.add_argument("--num_heads", "-nh", type=int, default=16)#12)
+parser.add_argument("--num_heads", "-nh", type=int, default=8)#16)#12)
 parser.add_argument("--max_position_embeddings", "-mpe", type=int, default=2048)
 parser.add_argument("--max_position_embeddings_multiplier", "-mpem", type=int, default=1)
 # parser.add_argument("--max_position_embeddings_multiplier", "-mpem", type=int, default=8)
@@ -223,134 +225,48 @@ mtpb = args.max_tokens_per_batch
 # Get GPU ID from cuda_visible_devices
 gpu_id = int(args.cuda_visible_devices) if args.cuda_visible_devices.isdigit() else 0
 
-# for (nh, hsm) in [(10, 1), (10, 2), (10, 3), (10, 4), (10, 5), (10, 6)]:
-# for (nh, hsm) in [(4, 2), (8, 2), (12, 2), (16, 2), (20, 2), (24, 2), (28, 2), (32, 2), (36, 2)]:
-# for (nh, hsm) in [(4, 2), (8, 2), (12, 2), (16, 2), (20, 2), (24, 2), (28, 2)]:
-# for (nh, hsm) in [(28, 2), (36, 2), (44, 2), (52, 2), (60, 2), (68, 2), (76, 2), (84, 2), (92, 2), (100, 2)]:
+data = [
+    # (109, 24),
+    # (21, 48),
+    # (2, 96),
+    # (1, 192),
+    # (82, 96),
+    # (19, 192),
+    # (4, 384),
+    # (55, 384),
+    # (221, 192),
+    # (13, 768),
+    # (140, 768),
+    # (35, 1536), 
+    (38, 144),
+    # (8, 3072)
+]
 
-# for (nh, hsm) in [(8, 2)]:
-# for (nh, hsm) in [(14, 1), (14, 2), (14, 4), (20, 1), (20, 2), (20, 4), (28, 1), (28, 2), (28, 4), (32, 1), (32, 2), (32, 4), (28, 5), (44, 4)]:
-# for (nh, hs, nheads) in [(23, 1806, 14)]: # 1792 should be a multiple of 3 and num_heads
 # for (nh, hs, nheads) in [(28, 2304, 18)]: # 1792 should be a multiple of 3 and num_heads
-# for (nh, hs, nheads) in [(12, 192, 6)]:
-for (nh, hs, nheads) in [(12, 768, 12)]:
 
-
-# for (nh, hsm) in [(4, 2)]:
-    print(f"Running for {nh} layers and {hsm} hidden size multiplier")
+results =  {}
+for (nh, hs) in data:
+    print(f"Running for {nh} layers and {hs} hidden size")
     args.num_hidden_layers = nh
-    args.hidden_size_multiplier = hsm
+    args.hidden_size_multiplier = 1
     
-    args.num_heads = nheads
+    # args.num_heads = nheads
 
     args.hidden_size = hs * args.hidden_size_multiplier
     args.max_position_embeddings = mpe * args.max_position_embeddings_multiplier
     args.max_tokens_per_batch = mtpb * args.max_tokens_per_batch_multiplier
 
-    high = 1.0
-    low = 0.1
-    last_vram_stats = None
-    while high - low > 0.1:
-        mid = (high + low) / 2
-        args.memory_fraction = mid
-        print(f"Memory fraction: {args.memory_fraction}")
-        # run_and_capture(cmd, timeout_seconds=args.timeout_seconds)
-        cmd = f"CUDA_VISIBLE_DEVICES={args.cuda_visible_devices} python -u -m cehrgpt.runners.hf_cehrgpt_pretrain_runner   --model_name_or_path {args.model_name_or_path}_test   --tokenizer_name_or_path {args.tokenizer_name_or_path}   --output_dir {args.output_dir}   --data_folder {args.data_folder}   --dataset_prepared_path {args.dataset_prepared_path}   --do_train true --seed 42   --dataloader_num_workers 16 --dataloader_prefetch_factor 8   --hidden_size {args.hidden_size} --num_hidden_layers {args.num_hidden_layers} --max_position_embeddings {args.max_position_embeddings} --evaluation_strategy epoch --save_strategy epoch   --sample_packing --max_tokens_per_batch {args.max_tokens_per_batch}   --warmup_steps 500 --weight_decay 0.01   --num_train_epochs 50 --learning_rate 0.0002   --use_early_stopping --early_stopping_threshold 0.001 --load_best_model_at_end True --n_head {args.num_heads} --memory_fraction {args.memory_fraction}"
+    args.memory_fraction = 1.0
+    cmd = f"CUDA_VISIBLE_DEVICES={args.cuda_visible_devices} python -u -m cehrgpt.runners.hf_cehrgpt_pretrain_runner   --model_name_or_path {args.model_name_or_path}_test   --tokenizer_name_or_path {args.tokenizer_name_or_path}   --output_dir {args.output_dir}   --data_folder {args.data_folder}   --dataset_prepared_path {args.dataset_prepared_path}   --do_train true --seed 42   --dataloader_num_workers 16 --dataloader_prefetch_factor 8   --hidden_size {args.hidden_size} --num_hidden_layers {args.num_hidden_layers} --max_position_embeddings {args.max_position_embeddings} --evaluation_strategy epoch --save_strategy epoch   --sample_packing --max_tokens_per_batch {args.max_tokens_per_batch}   --warmup_steps 500 --weight_decay 0.01   --num_train_epochs 50 --learning_rate 0.0002   --use_early_stopping --early_stopping_threshold 0.001 --load_best_model_at_end True --n_head {args.num_heads} --memory_fraction {args.memory_fraction}"
 
-        print(cmd)
-        monitor_thread, measurements = start_monitoring(gpu_id=gpu_id, interval=2.0)
-        return_code, result_text = run_and_capture(cmd, timeout_seconds=args.timeout_seconds)
-        print(f"Return code: {return_code}")
-        n_parameters = get_n_parameters(result_text)
+    print(cmd)
+    monitor_thread, measurements = start_monitoring(gpu_id=gpu_id, interval=2.0)
+    return_code, result_text = run_and_capture(cmd, timeout_seconds=args.timeout_seconds)
+    print(f"Return code: {return_code}")
+    n_parameters = get_n_parameters(result_text)
+    print(f"For {nh} layers and {hsm} hidden size multiplier, {n_parameters} parameters")
+    results[str((int(nh), int(hs)))] = int(n_parameters)
 
-        if return_code == 1:
-            low = mid
-            if last_vram_stats is None:
-                last_vram_stats = {
-                    "max_used_mb": np.nan,
-                    "avg_used_mb": np.nan,
-                    "total_mb": np.nan,
-                    "measurements": [],
-                    "n_parameters": n_parameters,
-                    'memory_fraction_low': low,
-                    'memory_fraction_high': high,
-                }
-            else:
-                last_vram_stats['memory_fraction_low'] = low
-                last_vram_stats['memory_fraction_high'] = high
-        else:
-            high = mid
-            monitor_thread.join(timeout=1)
-        
-            if measurements:
-                # Calculate VRAM statistics
-                used_memory = [m["used"] for m in measurements]
-                max_used = max(used_memory) if used_memory else 0
-                avg_used = sum(used_memory) / len(used_memory) if used_memory else 0
-                
-                last_vram_stats = {
-                    "max_used_mb": max_used,
-                    "avg_used_mb": avg_used,
-                    "total_mb": measurements[0]["total"] if measurements else 0,
-                    "measurements": measurements,
-                    "n_parameters": n_parameters,
-                    'memory_fraction_low': low,
-                    'memory_fraction_high': high,
-                }
-                
-                print(f"VRAM Usage - Max: {max_used}MB, Avg: {avg_used:.1f}MB")
-
-        # save results when works,
-
-    data_stats[(nh, hsm)] = last_vram_stats
-
-    # no early stopping
-    # cmd = f"CUDA_VISIBLE_DEVICES={args.cuda_visible_devices} python -u -m cehrgpt.runners.hf_cehrgpt_pretrain_runner   --model_name_or_path {args.model_name_or_path}   --tokenizer_name_or_path {args.tokenizer_name_or_path}   --output_dir {args.output_dir}   --data_folder {args.data_folder}   --dataset_prepared_path {args.dataset_prepared_path}   --do_train true --seed 42   --dataloader_num_workers 16 --dataloader_prefetch_factor 8   --hidden_size {args.hidden_size} --num_hidden_layers {args.num_hidden_layers} --max_position_embeddings {args.max_position_embeddings} --evaluation_strategy epoch --save_strategy epoch   --sample_packing --max_tokens_per_batch {args.max_tokens_per_batch}   --warmup_steps 500 --weight_decay 0.01   --num_train_epochs 20 --learning_rate 0.0002 --load_best_model_at_end True --n_head {args.num_heads} --use_early_stopping False"
-
-    # cmd = f"CUDA_VISIBLE_DEVICES={args.cuda_visible_devices} python -u -m cehrgpt.runners.hf_cehrgpt_pretrain_runner   --model_name_or_path {args.model_name_or_path}_test   --tokenizer_name_or_path {args.tokenizer_name_or_path}   --output_dir {args.output_dir}   --data_folder {args.data_folder}   --dataset_prepared_path {args.dataset_prepared_path}   --do_train true --seed 42   --dataloader_num_workers 16 --dataloader_prefetch_factor 8   --hidden_size {args.hidden_size} --num_hidden_layers {args.num_hidden_layers} --max_position_embeddings {args.max_position_embeddings} --evaluation_strategy epoch --save_strategy epoch   --sample_packing --max_tokens_per_batch {args.max_tokens_per_batch}   --warmup_steps 500 --weight_decay 0.01   --num_train_epochs 50 --learning_rate 0.0002   --use_early_stopping --early_stopping_threshold 0.001 --load_best_model_at_end True --n_head {args.num_heads} --model_size_only True"
-
-    # CUDA_VISIBLE_DEVICES=1 python -u -m cehrgpt.runners.hf_cehrgpt_pretrain_runner   --model_name_or_path $CEHR_GPT_MODEL_DIR   --tokenizer_name_or_path $CEHR_GPT_MODEL_DIR   --output_dir $CEHR_GPT_MODEL_DIR   --data_folder "$CEHR_GPT_DATA_DIR/patient_sequence/train"   --dataset_prepared_path "$CEHR_GPT_DATA_DIR/dataset_prepared"   --do_train true --seed 42   --dataloader_num_workers 16 --dataloader_prefetch_factor 8   --hidden_size 768 --num_hidden_layers 14 --max_position_embeddings 4096^C --evaluation_strategy epoch --save_strategy epoch   --sample_packing --max_tokens_per_batch 16384   --warmup_steps 500 --weight_decay 0.01   --num_train_epochs 50 --learning_rate 0.0002   --use_early_stopping --early_stopping_threshold 0.001 --load_bes
-    # t_model_at_end True
-
-    # args.memory_fraction = high # high always works
-    # run_and_capture(cmd, timeout_seconds=args.timeout_seconds)
-    # cmd = f"CUDA_VISIBLE_DEVICES={args.cuda_visible_devices} python -u -m cehrgpt.runners.hf_cehrgpt_pretrain_runner   --model_name_or_path {args.model_name_or_path}_test   --tokenizer_name_or_path {args.tokenizer_name_or_path}   --output_dir {args.output_dir}   --data_folder {args.data_folder}   --dataset_prepared_path {args.dataset_prepared_path}   --do_train true --seed 42   --dataloader_num_workers 16 --dataloader_prefetch_factor 8   --hidden_size {args.hidden_size} --num_hidden_layers {args.num_hidden_layers} --max_position_embeddings {args.max_position_embeddings} --evaluation_strategy epoch --save_strategy epoch   --sample_packing --max_tokens_per_batch {args.max_tokens_per_batch}   --warmup_steps 500 --weight_decay 0.01   --num_train_epochs 50 --learning_rate 0.0002   --use_early_stopping --early_stopping_threshold 0.001 --load_best_model_at_end True --n_head {args.num_heads} --memory_fraction {args.memory_fraction}"
-
-
-print("\n" + "="*50)
-
-
-if data_stats:
-    print("\n" + "="*50)
-    print("VRAM USAGE RESULTS:")
-    print("="*50)
-    for (nh, hsm), stats in data_stats.items():
-        print(f"Layers: {nh}, Hidden Size Multiplier: {hsm}, model size: {stats['n_parameters']}")
-        print(f"  Max VRAM Used: {stats['max_used_mb']}MB")
-        print(f"  Avg VRAM Used: {stats['avg_used_mb']:.1f}MB")
-        print(f"  Total VRAM: {stats['total_mb']}MB")
-        print(f"  Utilization: {stats['max_used_mb']/stats['total_mb']*100:.1f}%" if stats['total_mb'] > 0 else "  Utilization: N/A")
-        print()
-
-# add next steps script to run cehrgpt on the rest
-import pandas as pd
-
-# Convert sizes dict to proper DataFrame format
-# sizes_df = pd.DataFrame(list(sizes.items()), columns=['config', 'parameters'])
-# sizes_df.to_csv("sizes.csv", index=False)
-
-# Convert vram_stats dict to proper DataFrame format
-vram_data = []
-for (nh, hsm), stats in data_stats.items():
-    vram_data.append({
-        'layers': nh,
-        'hidden_size_multiplier': hsm,
-        'max_used_mb': stats['max_used_mb'],
-        'avg_used_mb': stats['avg_used_mb'],
-        'total_mb': stats['total_mb'],
-        'n_parameters': stats['n_parameters'],
-        'memory_fraction_low': stats['memory_fraction_low'],
-        'memory_fraction_high': stats['memory_fraction_high'],
-    })
-vram_df = pd.DataFrame(vram_data)
-vram_df.to_csv("data_size_stats_3.csv", index=False)
+# save results to a json file
+with open("results_exact_values.json", "w") as f:
+    json.dump(results, f)

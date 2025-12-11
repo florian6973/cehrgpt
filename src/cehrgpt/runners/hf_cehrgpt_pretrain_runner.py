@@ -4,7 +4,11 @@ from typing import Optional, Union
 
 import numpy as np
 import torch
+import torch.nn as nn
 import torch.distributed as dist
+
+from torch.utils.flop_counter import FlopCounterMode
+
 from cehrbert.data_generators.hf_data_generator.meds_utils import (
     CacheFileCollector,
     create_dataset_from_meds_reader,
@@ -142,7 +146,8 @@ def load_and_create_model(
     tokenizer: CehrGptTokenizer,
 ) -> CEHRGPT2LMHeadModel:
     attn_implementation = (
-        "flash_attention_2" if is_flash_attn_2_available() else "eager"
+        # "flash_attention_2" if is_flash_attn_2_available() else "eager"
+        "eager"
     )
     torch_dtype = get_torch_dtype(model_args.torch_dtype)
     model_abspath = os.path.expanduser(model_args.model_name_or_path)
@@ -232,6 +237,83 @@ def load_and_create_model(
     elif model.config.torch_dtype == torch.float16:
         return model.half()
     return model
+
+
+def count_parameters_2(model):
+    embedding_params = 0
+    bias_params = 0
+    layernorm_params = 0
+    other_params = 0
+    embedding_details = []
+
+    modules_dict = dict(model.named_modules())
+
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue  # skip frozen parameters
+
+        parent_name = name.rsplit('.', 1)[0] if '.' in name else ''
+        parent_module = modules_dict.get(parent_name, None)
+
+        # --- Categorize ---
+        if isinstance(parent_module, nn.Embedding):
+            embedding_params += param.numel()
+            # Save details only once (avoid duplication for weight param)
+            if name.endswith("weight"):
+                embedding_details.append({
+                    "name": parent_name if parent_name else "embedding",
+                    "vocab_size": parent_module.num_embeddings,
+                    "embedding_dim": parent_module.embedding_dim,
+                    "params": param.numel()
+                })
+        elif name.endswith("bias"):
+            bias_params += param.numel()
+        elif isinstance(parent_module, nn.LayerNorm):
+            layernorm_params += param.numel()
+        else:
+            other_params += param.numel()
+
+    return {
+        "embedding_total": embedding_params,
+        "bias_total": bias_params,
+        "layernorm_total": layernorm_params,
+        "other_total": other_params,
+        "total": embedding_params + bias_params + layernorm_params + other_params,
+        "embedding_layers": embedding_details
+    }
+
+def count_parameters(model):
+    embedding_params = 0
+    bias_params = 0
+    layernorm_params = 0
+    other_params = 0
+
+    modules_dict = dict(model.named_modules())
+
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue  # skip frozen parameters
+
+        parent_name = name.rsplit('.', 1)[0] if '.' in name else ''
+        parent_module = modules_dict.get(parent_name, None)
+
+        # --- Categorize ---
+        if isinstance(parent_module, nn.Embedding):
+            embedding_params += param.numel()
+        elif name.endswith("bias"):
+            bias_params += param.numel()
+        elif isinstance(parent_module, nn.LayerNorm):
+            layernorm_params += param.numel()
+        else:
+            other_params += param.numel()
+
+    return {
+        "embedding": embedding_params,
+        "bias": bias_params,
+        "layernorm": layernorm_params,
+        "other": other_params,
+        "total": embedding_params + bias_params + layernorm_params + other_params
+    }
 
 
 def main():
@@ -475,12 +557,72 @@ def main():
         processed_dataset = processed_dataset.filter(filter_func, **filter_args)
 
     model = load_and_create_model(model_args, cehrgpt_args, cehrgpt_tokenizer)
+    print(model)
     # print number of parameters
     model_size = sum(p.numel() for p in model.parameters())
+    # count non embedding parameters
+    params_split = count_parameters_2(model)
+    print(params_split)
     print(f"Number of parameters: {model_size}, number of layers: {model.config.num_hidden_layers}, hidden size: {model.config.hidden_size}")
     if cehrgpt_args.model_size_only:
         print(model_size)
-        return model_size
+        return model_size_only
+
+    context_length = 2048
+    size = 256
+    n_batch = 20
+    def flops_per_token():
+        d = model.config.hidden_size
+        k = model.config.num_hidden_layers
+        h = model.config.n_head
+        V = model.config.vocab_size
+        # fpt = 9*d + k*(40*d+24*d**2+ 4*N*d+6*N*h)
+        # fpt = 9*d+ k*(40*d+24*d**2+4*size*d+6*size*h)+2*d*V
+        fpt = 2*d*V+k*(24*d**2+4*size*d+6*size*h)
+        return fpt
+    
+    input_tensor = torch.randint(0, 100, (n_batch, size), dtype=torch.long).to(model.device)
+
+    # what part of the model flops change when changing length
+    with FlopCounterMode(display=True) as fcm:
+        output = model(input_tensor)
+        flops = fcm.get_total_flops()/size/n_batch # flops per token
+        # context length vs actual prompt length
+        print(f"Flops per token: {flops}")
+
+    e_fpt = flops_per_token()
+    print("Estimated FPT", e_fpt)
+    print("Relative difference", abs(e_fpt - flops)/flops*100, "%")
+
+    # ratio flops/N_params
+    print(e_fpt/model_size)
+
+    exit()
+
+    # from calflops import calculate_flops
+
+    # batch_size = 1
+    # input_shape = (batch_size, size)
+    # flops, macs, params = calculate_flops(model=model, 
+    #                                     input_shape=input_shape,
+    #                                     output_as_string=True,
+    #                                     output_precision=4,
+    #                                     )
+    # print("FLOPs:%s   MACs:%s   Params:%s \n" %(flops, macs, params))
+    # from pthflops import count_ops
+    from ptflops import get_model_complexity_info
+
+    input_tensor = torch.randint(0, 100, (n_batch, size), dtype=torch.long).to(model.device)
+    # count_ops(model, input_tensor)
+    macs, params = get_model_complexity_info(model, (n_batch, size), as_strings=False, backend='aten',
+                                           print_per_layer_stat=True, verbose=True, input_constructor= lambda x: input_tensor)
+    final_macs = int(macs)/size/n_batch
+    print('{:<30}  {:<8}'.format('Computational complexity: ', final_macs))
+    print('{:<30}  {:<8}'.format('Number of parameters: ', params))
+    print("Estimated FPT again", e_fpt)
+    print("Relative difference 2", abs(e_fpt - final_macs*2)/final_macs/2*100, "%")
+
+    exit()
 
     # Try to update motor tte vocab size if the new configuration is different from the existing one
     if cehrgpt_args.include_motor_time_to_event:
@@ -547,6 +689,8 @@ def main():
     else:
         trainer_class = Trainer
         data_collator_fn = CehrGptDataCollator
+
+    # print(model)
 
     trainer = trainer_class(
         model=model,

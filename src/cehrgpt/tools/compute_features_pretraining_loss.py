@@ -127,6 +127,7 @@ if __name__ == "__main__":
         ),
         include_values=cehrgpt_model.config.include_values,
         pretraining=True,  # Changed to True to enable labels for loss computation
+
         # include_ttv_prediction=False,
         # use_sub_time_tokenization=False,
         include_demographics=cehrgpt_args.include_demographics,
@@ -189,6 +190,7 @@ if __name__ == "__main__":
 
     ve_token_id = cehrgpt_tokenizer._convert_token_to_id("[VE]")
     losses = []
+    all_losses = []
     for split, data_loader in [("train", train_loader), ("test", test_dataloader)]:
         # Ensure prediction folder exists
         feature_output_folder = (
@@ -220,10 +222,12 @@ if __name__ == "__main__":
                 # only one loss
                 # exit()
                 losses.append(cehrgpt_output.loss.item())
+                all_losses.append((cehrgpt_output.token_loss.item(), cehrgpt_output.time_token_loss.item(), cehrgpt_output.time_to_visit_loss.item()))
                 print(min(losses), max(losses), np.mean(losses))
 
-                if len(losses) > 100:
+                if len(losses) > 1000: #100:
                     np.save(os.path.join(training_args.output_dir, "losses-test.npy"), losses)
+                    np.save(os.path.join(training_args.output_dir, "all_losses-test.npy"), all_losses)
                     exit()
                 continue
                 
