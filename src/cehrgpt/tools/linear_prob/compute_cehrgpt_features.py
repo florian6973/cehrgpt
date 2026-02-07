@@ -305,6 +305,7 @@ def main():
     else:
         # Loading demographics
         print("Loading demographics as a dictionary")
+        # print("Data_dir", data_args.data_folder)
         demographics_df = pd.concat(
             [
                 pd.read_parquet(
@@ -317,6 +318,7 @@ def main():
                     ],
                 )
                 for data_dir in [data_args.data_folder, data_args.test_data_folder]
+                if data_dir is not None
             ]
         )
 

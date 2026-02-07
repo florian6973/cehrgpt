@@ -90,11 +90,11 @@ class CehrGPTArguments:
         default_factory=lambda: [10],
         metadata={"help": "Hyperparameter search num_train_epochs"},
     )
-    hyperparameter_learning_rates: Optional[List[int]] = dataclasses.field(
+    hyperparameter_learning_rates: Optional[List[float]] = dataclasses.field(
         default_factory=lambda: [1e-5],
         metadata={"help": "Hyperparameter search learning rates"},
     )
-    hyperparameter_weight_decays: Optional[List[int]] = dataclasses.field(
+    hyperparameter_weight_decays: Optional[List[float]] = dataclasses.field(
         default_factory=lambda: [1e-2],
         metadata={"help": "Hyperparameter search learning rates"},
     )
