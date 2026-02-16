@@ -50,12 +50,39 @@ def main(args):
         print("The models have been trained, and skip ...")
         exit(0)
 
-    feature_train = pd.read_parquet(
-        features_data_dir / "features_with_label" / "train_features"
-    )
-    feature_test = pd.read_parquet(
-        features_data_dir / "features_with_label" / "test_features"
-    )
+    train_dir = features_data_dir / "features_with_label" / "train_features"
+    test_dir = features_data_dir / "features_with_label" / "test_features"
+
+    def load_and_cast(dir_path):
+        dfs = []
+        for file in Path(dir_path).glob("*.parquet"):
+            df = pd.read_parquet(file)
+
+            # Cast only if prediction_time is datetime64[ns]
+            if "prediction_time" in df.columns:
+                dtype = df["prediction_time"].dtype
+                # print(dtype)
+
+                # case 1: pandas datetime64[ns]
+                if dtype == "datetime64[ns]":
+                    df["prediction_time"] = (
+                        df["prediction_time"]
+                        .astype("datetime64[us]")
+                    )
+
+                # # case 2: integer nanoseconds
+                # elif dtype == "int64":
+                #     # assume it's ns; convert to µs
+                #     df["prediction_time"] = df["prediction_time"] // 1_000
+
+                # otherwise: do NOTHING (already µs or object)
+
+            dfs.append(df)
+
+        return pd.concat(dfs, ignore_index=True)
+
+    feature_train = load_and_cast(train_dir)
+    feature_test  = load_and_cast(test_dir)
 
     feature_train = feature_train.sort_values(["subject_id", "prediction_time"]).sample(
         frac=1.0,

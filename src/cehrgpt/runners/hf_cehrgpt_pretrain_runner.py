@@ -355,6 +355,7 @@ def main():
                         dataset = load_from_disk(str(meds_extension_path))
             else:
                 # Load the dataset from the parquet files
+                print("Load data", os.path.expanduser(data_args.data_folder))
                 dataset = load_parquet_as_dataset(
                     os.path.expanduser(data_args.data_folder),
                     split="train",
