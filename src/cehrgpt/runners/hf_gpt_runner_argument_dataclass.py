@@ -90,13 +90,31 @@ class CehrGPTArguments:
         default_factory=lambda: [10],
         metadata={"help": "Hyperparameter search num_train_epochs"},
     )
-    hyperparameter_learning_rates: Optional[List[int]] = dataclasses.field(
+    hyperparameter_learning_rates: Optional[List[float]] = dataclasses.field(
         default_factory=lambda: [1e-5],
-        metadata={"help": "Hyperparameter search learning rates"},
+        metadata={"help": "Hyperparameter search learning rates (one value for grid, [low, high] for TPE)"},
     )
-    hyperparameter_weight_decays: Optional[List[int]] = dataclasses.field(
+    hyperparameter_weight_decays: Optional[List[float]] = dataclasses.field(
         default_factory=lambda: [1e-2],
-        metadata={"help": "Hyperparameter search learning rates"},
+        metadata={"help": "Hyperparameter search weight decay (one value for grid, [low, high] for TPE)"},
+    )
+    hyperparameter_float_sampling: Literal["log", "uniform"] = dataclasses.field(
+        default="log",
+        metadata={
+            "help": "For TPE: 'log' = log-uniform sampling for learning_rate/weight_decay; 'uniform' = linear uniform."
+        },
+    )
+    hyperparameter_sampler: Literal["tpe", "random"] = dataclasses.field(
+        default="tpe",
+        metadata={
+            "help": "When not grid: 'tpe' = Optuna TPESampler (Bayesian); 'random' = RandomSampler (uniform random)."
+        },
+    )
+    train_subset_fraction: Optional[float] = dataclasses.field(
+        default=1.0,
+        metadata={
+            "help": "Use only this fraction of train and validation data (e.g. 0.1 = 10%%). 1.0 = full data. For learning curves or small-data experiments."
+        },
     )
     causal_sfm: Optional[bool] = dataclasses.field(
         default=False,

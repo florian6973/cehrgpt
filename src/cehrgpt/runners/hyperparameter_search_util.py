@@ -69,6 +69,7 @@ def get_suggestion(
     hyperparameter_name: str,
     hyperparameters: List[Union[float, int]],
     is_grid: bool = False,
+    use_log_scale: bool = True,
 ) -> Union[float, int]:
     """
     Get hyperparameter suggestion based on search mode.
@@ -78,6 +79,7 @@ def get_suggestion(
         hyperparameter_name: Name of the hyperparameter
         hyperparameters: List of hyperparameter values
         is_grid: Whether to use grid search mode
+        use_log_scale: If True (TPE), sample floats log-uniformly; if False, sample uniformly.
 
     Returns:
         Suggested hyperparameter value
@@ -97,7 +99,7 @@ def get_suggestion(
 
     # Ensure bounds are sorted
     lower, upper = sorted(hyperparameters)
-    return trial.suggest_float(hyperparameter_name, lower, upper, log=True)
+    return trial.suggest_float(hyperparameter_name, lower, upper, log=use_log_scale)
 
 
 def hp_space(trial: optuna.Trial, cehrgpt_args: CehrGPTArguments):
@@ -112,6 +114,7 @@ def hp_space(trial: optuna.Trial, cehrgpt_args: CehrGPTArguments):
     """
 
     is_grid = cehrgpt_args.hyperparameter_tuning_is_grid
+    use_log_scale = cehrgpt_args.hyperparameter_float_sampling == "log"
     learning_rates = cehrgpt_args.hyperparameter_learning_rates
     weight_decays = cehrgpt_args.hyperparameter_weight_decays
     batch_sizes = cehrgpt_args.hyperparameter_batch_sizes
@@ -119,12 +122,14 @@ def hp_space(trial: optuna.Trial, cehrgpt_args: CehrGPTArguments):
 
     return {
         "learning_rate": get_suggestion(
-            trial, "learning_rate", learning_rates, is_grid
+            trial, "learning_rate", learning_rates, is_grid, use_log_scale
         ),
         "per_device_train_batch_size": trial.suggest_categorical(
             "per_device_train_batch_size", batch_sizes
         ),
-        "weight_decay": get_suggestion(trial, "weight_decay", weight_decays, is_grid),
+        "weight_decay": get_suggestion(
+            trial, "weight_decay", weight_decays, is_grid, use_log_scale
+        ),
         "num_train_epochs": trial.suggest_categorical(
             "num_train_epochs", num_train_epochs
         ),
@@ -271,13 +276,16 @@ def perform_hyperparameter_search(
         # Configure sampler based on search mode
         sampler = optuna.samplers.GridSampler(search_space, seed=training_args.seed)
     else:
-        LOG.info("Bayesian optimization mode (TPE)")
+        if cehrgpt_args.hyperparameter_sampler == "random":
+            LOG.info("Random search mode (uniform random sampler)")
+            sampler = optuna.samplers.RandomSampler(seed=training_args.seed)
+        else:
+            LOG.info("Bayesian optimization mode (TPE)")
+            sampler = optuna.samplers.TPESampler(seed=training_args.seed)
         LOG.info(f"Learning rate bounds: {cehrgpt_args.hyperparameter_learning_rates}")
         LOG.info(f"Weight decay bounds: {cehrgpt_args.hyperparameter_weight_decays}")
         LOG.info(f"Batch sizes: {cehrgpt_args.hyperparameter_batch_sizes}")
         LOG.info(f"Epochs: {cehrgpt_args.hyperparameter_num_train_epochs}")
-        # Configure the TPE sampler
-        sampler = optuna.samplers.TPESampler(seed=training_args.seed)
 
     # Prepare datasets
     save_total_limit_original = training_args.save_total_limit

@@ -59,7 +59,10 @@ from cehrgpt.runners.data_utils import (
 from cehrgpt.runners.gpt_runner_util import parse_runner_args
 from cehrgpt.runners.hf_cehrgpt_pretrain_runner import tokenizer_exists
 from cehrgpt.runners.hf_gpt_runner_argument_dataclass import CehrGPTArguments
-from cehrgpt.runners.hyperparameter_search_util import perform_hyperparameter_search
+from cehrgpt.runners.hyperparameter_search_util import (
+    perform_hyperparameter_search,
+    sample_dataset,
+)
 from cehrgpt.runners.sample_packing_trainer import SamplePackingTrainer
 
 LOG = logging.get_logger("transformers")
@@ -240,6 +243,10 @@ def main():
     prepared_ds_path = generate_prepared_ds_path(
         data_args, model_args, data_folder=data_args.cohort_folder
     )
+    # Include observation_window in cache path so changing it invalidates the cache
+    observation_window = getattr(data_args, "observation_window", None)
+    if observation_window is not None:
+        prepared_ds_path = Path(str(prepared_ds_path) + f"_ow{observation_window}")
     cache_file_collector = CacheFileCollector()
     processed_dataset = None
     if any(prepared_ds_path.glob("*")):
@@ -336,6 +343,32 @@ def main():
 
     # Set seed before initializing model.
     set_seed(training_args.seed)
+
+    # Optionally use a subset of train/val for different dataset-size experiments
+    train_subset = getattr(
+        cehrgpt_args, "train_subset_fraction", 1.0
+    )
+    if train_subset is not None and 0.0 < train_subset < 1.0:
+        LOG.info(
+            "Subsampling train and validation to %.2f of original size (seed=%s)",
+            train_subset,
+            training_args.seed,
+        )
+        processed_dataset = DatasetDict(
+            {
+                "train": sample_dataset(
+                    processed_dataset["train"],
+                    train_subset,
+                    training_args.seed,
+                ),
+                "validation": sample_dataset(
+                    processed_dataset["validation"],
+                    train_subset,
+                    training_args.seed,
+                ),
+                "test": processed_dataset["test"],
+            }
+        )
 
     if not data_args.streaming and not cehrgpt_args.sample_packing:
         processed_dataset.set_format("pt")
