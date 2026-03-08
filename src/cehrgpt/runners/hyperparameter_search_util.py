@@ -20,7 +20,34 @@ LOG = logging.get_logger("transformers")
 
 
 class WandbRunNameCallback(TrainerCallback):
-    """Set wandb run name from training_args.run_name at train start (e.g. hp-based name)."""
+    """Set wandb run name from training_args.run_name (e.g. hp-based name). Sets env var before init and/or updates run after."""
+
+    def __init__(self):
+        self._name_set = False
+
+    def _try_set_name(self, args: TrainingArguments) -> None:
+        if self._name_set:
+            return
+        run_name = getattr(args, "run_name", None)
+        if not run_name:
+            return
+        report_to = getattr(args, "report_to", None) or []
+        report_list = report_to if isinstance(report_to, list) else [report_to]
+        if "wandb" not in report_list and "all" not in report_list:
+            return
+        run_name_str = str(run_name)
+        # So wandb.init() picks it up when Trainer/accelerator inits tracking
+        import os
+        os.environ["WANDB_NAME"] = run_name_str
+        try:
+            import wandb
+            if wandb.run is not None:
+                wandb.run.name = run_name_str
+                wandb.run.save()
+                self._name_set = True
+                LOG.info("Set wandb run name to: %s", run_name_str)
+        except Exception as e:
+            LOG.debug("Could not set wandb run name: %s", e)
 
     def on_train_begin(
         self,
@@ -29,21 +56,32 @@ class WandbRunNameCallback(TrainerCallback):
         control: TrainerControl,
         **kwargs,
     ):
+        # Set env var so wandb.init() (called after callbacks) uses this name
         run_name = getattr(args, "run_name", None)
-        if not run_name:
-            return
-        report_to = getattr(args, "report_to", None) or []
-        report_list = report_to if isinstance(report_to, list) else [report_to]
-        if "wandb" not in report_list and "all" not in report_list:
-            return
-        try:
-            import wandb
-            if wandb.run is not None:
-                wandb.run.name = run_name
-                wandb.run.save()
-                LOG.info("Set wandb run name to: %s", run_name)
-        except Exception as e:
-            LOG.debug("Could not set wandb run name: %s", e)
+        if run_name:
+            import os
+            os.environ["WANDB_NAME"] = str(run_name)
+        self._try_set_name(args)
+
+    def on_log(
+        self,
+        args: TrainingArguments,
+        state: TrainerState,
+        control: TrainerControl,
+        logs=None,
+        **kwargs,
+    ):
+        self._try_set_name(args)
+
+    def on_step_begin(
+        self,
+        args: TrainingArguments,
+        state: TrainerState,
+        control: TrainerControl,
+        **kwargs,
+    ):
+        if state.global_step == 0:
+            self._try_set_name(args)
 
 
 class OptunaMetricCallback(TrainerCallback):
