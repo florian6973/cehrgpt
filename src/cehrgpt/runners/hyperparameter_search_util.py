@@ -409,7 +409,6 @@ def perform_hyperparameter_search(
         training_args.seed,
     )
     hp_space_fn = partial(hp_space, cehrgpt_args=cehrgpt_args)
-    compute_objective = lambda m: m["optuna_best_metric"]
 
     def objective(trial: optuna.Trial):
         # Get suggested params (includes run_name)
@@ -433,9 +432,17 @@ def perform_hyperparameter_search(
             ],
             args=training_args,
         )
-        train_result = trainer.train()
-        metrics = train_result.metrics
-        return compute_objective(metrics)
+        trainer.train()
+        # Use Trainer's best eval metric (same as optuna_best_metric from callback)
+        best_metric = getattr(trainer.state, "best_metric", None)
+        if best_metric is None and trainer.state.log_history:
+            for entry in reversed(trainer.state.log_history):
+                if "eval_loss" in entry:
+                    best_metric = entry["eval_loss"]
+                    break
+        if best_metric is None:
+            best_metric = float("inf")
+        return best_metric
 
     study = optuna.create_study(direction="minimize", sampler=sampler)
     optuna_callbacks = []
