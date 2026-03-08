@@ -4,13 +4,46 @@ from typing import Callable, List, Optional, Tuple, Union
 import optuna
 from cehrbert.runners.hf_runner_argument_dataclass import ModelArguments
 from datasets import Dataset, DatasetDict
-from transformers import EarlyStoppingCallback, TrainerCallback, TrainingArguments
+from transformers import (
+    EarlyStoppingCallback,
+    TrainerCallback,
+    TrainerControl,
+    TrainerState,
+    TrainingArguments,
+)
 from transformers.utils import logging
 
 from cehrgpt.data.hf_cehrgpt_dataset_collator import CehrGptDataCollator
 from cehrgpt.runners.hf_gpt_runner_argument_dataclass import CehrGPTArguments
 
 LOG = logging.get_logger("transformers")
+
+
+class WandbRunNameCallback(TrainerCallback):
+    """Set wandb run name from training_args.run_name at train start (e.g. hp-based name)."""
+
+    def on_train_begin(
+        self,
+        args: TrainingArguments,
+        state: TrainerState,
+        control: TrainerControl,
+        **kwargs,
+    ):
+        run_name = getattr(args, "run_name", None)
+        if not run_name:
+            return
+        report_to = getattr(args, "report_to", None) or []
+        report_list = report_to if isinstance(report_to, list) else [report_to]
+        if "wandb" not in report_list and "all" not in report_list:
+            return
+        try:
+            import wandb
+            if wandb.run is not None:
+                wandb.run.name = run_name
+                wandb.run.save()
+                LOG.info("Set wandb run name to: %s", run_name)
+        except Exception as e:
+            LOG.debug("Could not set wandb run name: %s", e)
 
 
 class OptunaMetricCallback(TrainerCallback):
@@ -344,6 +377,7 @@ def perform_hyperparameter_search(
         train_dataset=sampled_train,
         eval_dataset=sampled_val,
         callbacks=[
+            WandbRunNameCallback(),
             EarlyStoppingCallback(model_args.early_stopping_patience),
             OptunaMetricCallback(),
         ],

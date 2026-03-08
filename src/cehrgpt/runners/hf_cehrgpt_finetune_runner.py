@@ -64,6 +64,7 @@ from cehrgpt.runners.hyperparameter_search_util import (
     _finetune_run_name,
     perform_hyperparameter_search,
     sample_dataset,
+    WandbRunNameCallback,
 )
 from cehrgpt.runners.sample_packing_trainer import SamplePackingTrainer
 
@@ -583,6 +584,7 @@ def main():
                 train_dataset=processed_dataset["train"],
                 eval_dataset=processed_dataset["validation"],
                 callbacks=[
+                    WandbRunNameCallback(),
                     EarlyStoppingCallback(model_args.early_stopping_patience),
                     UpdateNumEpochsBeforeEarlyStoppingCallback(
                         training_args.output_dir
