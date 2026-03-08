@@ -281,8 +281,13 @@ def perform_hyperparameter_search(
             )
             cehrgpt_args.n_trials = total_combinations
 
-        # Configure sampler based on search mode
-        sampler = optuna.samplers.GridSampler(search_space, seed=training_args.seed)
+        # Configure sampler based on search mode (seed for GridSampler added in Optuna 3.3+)
+        try:
+            sampler = optuna.samplers.GridSampler(
+                search_space, seed=training_args.seed
+            )
+        except TypeError:
+            sampler = optuna.samplers.GridSampler(search_space)
     else:
         if cehrgpt_args.hyperparameter_sampler == "random":
             LOG.info("Random search mode (uniform random sampler)")
