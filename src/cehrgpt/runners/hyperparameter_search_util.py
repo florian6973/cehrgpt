@@ -408,45 +408,77 @@ def perform_hyperparameter_search(
         cehrgpt_args.hyperparameter_tuning_percentage,
         training_args.seed,
     )
-    # Create trainer
-    hyperparam_trainer = trainer_class(
-        model_init=model_init,
-        data_collator=data_collator,
-        train_dataset=sampled_train,
-        eval_dataset=sampled_val,
-        callbacks=[
-            WandbRunNameCallback(),
-            EarlyStoppingCallback(model_args.early_stopping_patience),
-            OptunaMetricCallback(),
-        ],
-        args=training_args,
+    hp_space_fn = partial(hp_space, cehrgpt_args=cehrgpt_args)
+    compute_objective = lambda m: m["optuna_best_metric"]
+
+    def objective(trial: optuna.Trial):
+        # Get suggested params (includes run_name)
+        params = hp_space_fn(trial)
+        for k, v in params.items():
+            setattr(training_args, k, v)
+        # Set wandb run name before Trainer.train() so wandb.init() picks it up
+        run_name = params.get("run_name")
+        if run_name:
+            import os
+            os.environ["WANDB_NAME"] = str(run_name)
+        trainer = trainer_class(
+            model_init=model_init,
+            data_collator=data_collator,
+            train_dataset=sampled_train,
+            eval_dataset=sampled_val,
+            callbacks=[
+                WandbRunNameCallback(),
+                EarlyStoppingCallback(model_args.early_stopping_patience),
+                OptunaMetricCallback(),
+            ],
+            args=training_args,
+        )
+        train_result = trainer.train()
+        metrics = train_result.metrics
+        return compute_objective(metrics)
+
+    study = optuna.create_study(direction="minimize", sampler=sampler)
+    optuna_callbacks = []
+    try:
+        from optuna.integration.wandb import WeightsAndBiasesCallback
+        import os
+        wandb_kwargs = {"project": os.environ.get("WANDB_PROJECT", "CEHRGPT")}
+        optuna_callbacks.append(
+            WeightsAndBiasesCallback(
+                metric_name="optuna_best_metric",
+                wandb_kwargs=wandb_kwargs,
+                as_multirun=False,
+            )
+        )
+        LOG.info("Using Optuna WeightsAndBiasesCallback for study-level logging")
+    except ImportError:
+        pass
+
+    study.optimize(
+        objective,
+        n_trials=cehrgpt_args.n_trials,
+        callbacks=optuna_callbacks,
     )
 
-    best_trial = hyperparam_trainer.hyperparameter_search(
-        direction="minimize",
-        hp_space=partial(
-            hp_space,
-            cehrgpt_args=cehrgpt_args,
-        ),
-        backend="optuna",
-        n_trials=cehrgpt_args.n_trials,
-        compute_objective=lambda m: m["optuna_best_metric"],
-        sampler=sampler,
-    )
+    best_trial = study.best_trial
+    # run_id for output dir (exclude run_name from saved hyperparams for TrainingArguments)
+    best_hyperparams = {k: v for k, v in best_trial.params.items() if k != "run_name"}
 
     # Log results
     LOG.info("=" * 50)
     LOG.info("HYPERPARAMETER SEARCH COMPLETED")
     LOG.info("=" * 50)
-    LOG.info(f"Best hyperparameters: {best_trial.hyperparameters}")
-    LOG.info(f"Best metric (eval_loss): {best_trial.objective}")
-    LOG.info(f"Best run_id: {best_trial.run_id}")
+    LOG.info(f"Best hyperparameters: {best_hyperparams}")
+    LOG.info(f"Best metric (eval_loss): {best_trial.value}")
+    LOG.info(f"Best trial number: {best_trial.number}")
     LOG.info("=" * 50)
 
     # Restore original settings and update with best hyperparameters
     training_args.save_total_limit = save_total_limit_original
-    for k, v in best_trial.hyperparameters.items():
+    for k, v in best_hyperparams.items():
         setattr(training_args, k, v)
         LOG.info(f"Updated training_args.{k} = {v}")
+    if "run_name" in best_trial.params:
+        setattr(training_args, "run_name", best_trial.params["run_name"])
 
-    return training_args, best_trial.run_id
+    return training_args, str(best_trial.number)
