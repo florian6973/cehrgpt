@@ -47,6 +47,7 @@ from cehrgpt.data.sample_packing_sampler import SamplePackingBatchSampler
 from cehrgpt.models.hf_cehrgpt import (
     CEHRGPTConfig,
     CehrGptForClassification,
+    CehrGptForClassificationSimple,
     CEHRGPTPreTrainedModel,
 )
 from cehrgpt.models.pretrained_embeddings import PretrainedEmbeddings
@@ -143,9 +144,12 @@ def load_finetuned_model(
     model_args: ModelArguments,
     training_args: TrainingArguments,
     model_name_or_path: str,
+    simple_head: bool = False,
 ) -> CEHRGPTPreTrainedModel:
     if model_args.finetune_model_type == FineTuneModelType.POOLING.value:
-        finetune_model_cls = CehrGptForClassification
+        finetune_model_cls = (
+            CehrGptForClassificationSimple if simple_head else CehrGptForClassification
+        )
     else:
         raise ValueError(
             f"finetune_model_type can be one of the following types {FineTuneModelType.POOLING.value}"
@@ -165,6 +169,76 @@ def load_finetuned_model(
         raise ValueError(f"Can not load the finetuned model from {model_name_or_path}")
 
 
+def _get_head_param_names(simple_head: bool) -> set:
+    """Parameter names that belong to the classification head (for lr_ratio)."""
+    if simple_head:
+        return {"classifier"}
+    return {"age_batch_norm", "dense_layer", "classifier"}
+
+
+def _create_optimizer_with_lr_ratio(trainer: Trainer, lr_ratio: float, head_param_names: set):
+    """Build optimizer with backbone lr and head lr = base_lr * lr_ratio."""
+    base_lr = trainer.args.learning_rate
+    head_lr = base_lr * lr_ratio
+    head_params = []
+    backbone_params = []
+    for n, p in trainer.model.named_parameters():
+        if not p.requires_grad:
+            continue
+        name = n.split(".")[0] if "." in n else n
+        if name in head_param_names:
+            head_params.append(p)
+        else:
+            backbone_params.append(p)
+    param_groups = []
+    if backbone_params:
+        param_groups.append({"params": backbone_params, "lr": base_lr})
+    if head_params:
+        param_groups.append({"params": head_params, "lr": head_lr})
+    if not param_groups:
+        return None
+    opt_cls = (
+        trainer.args.optim
+        if isinstance(trainer.args.optim, type)
+        else torch.optim.AdamW
+    )
+    return opt_cls(param_groups, weight_decay=trainer.args.weight_decay)
+
+
+class ClassificationTrainerWithLrRatio(Trainer):
+    """Trainer that applies lr_ratio to the classification head when lr_ratio != 1."""
+
+    def __init__(self, lr_ratio: float = 1.0, simple_head: bool = False, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._lr_ratio = lr_ratio
+        self._head_param_names = _get_head_param_names(simple_head)
+
+    def create_optimizer(self):
+        if self._lr_ratio == 1.0:
+            return super().create_optimizer()
+        self.optimizer = _create_optimizer_with_lr_ratio(
+            self, self._lr_ratio, self._head_param_names
+        )
+        return self.optimizer
+
+
+class SamplePackingTrainerWithLrRatio(SamplePackingTrainer):
+    """SamplePackingTrainer with lr_ratio applied to classification head."""
+
+    def __init__(self, lr_ratio: float = 1.0, simple_head: bool = False, *args, **kwargs):
+        self._lr_ratio = lr_ratio
+        self._head_param_names = _get_head_param_names(simple_head)
+        super().__init__(*args, **kwargs)
+
+    def create_optimizer(self):
+        if self._lr_ratio == 1.0:
+            return super().create_optimizer()
+        self.optimizer = _create_optimizer_with_lr_ratio(
+            self, self._lr_ratio, self._head_param_names
+        )
+        return self.optimizer
+
+
 def model_init(
     model_args: ModelArguments,
     training_args: TrainingArguments,
@@ -172,7 +246,10 @@ def model_init(
     tokenizer: CehrGptTokenizer,
 ):
     model = load_finetuned_model(
-        model_args, training_args, model_args.model_name_or_path
+        model_args,
+        training_args,
+        model_args.model_name_or_path,
+        simple_head=getattr(cehrgpt_args, "simple_head", False),
     )
 
     if cehrgpt_args.class_weights:
@@ -221,13 +298,18 @@ def model_init(
             training_args.label_names = ["classifier_label"]
 
         if model_args.finetune_model_type == FineTuneModelType.POOLING.value:
+            modules_to_save = (
+                ["classifier"]
+                if getattr(cehrgpt_args, "simple_head", False)
+                else ["classifier", "age_batch_norm", "dense_layer"]
+            )
             config = LoraConfig(
                 r=model_args.lora_rank,
                 lora_alpha=model_args.lora_alpha,
                 target_modules=model_args.target_modules,
                 lora_dropout=model_args.lora_dropout,
                 bias="none",
-                modules_to_save=["classifier", "age_batch_norm", "dense_layer"],
+                modules_to_save=modules_to_save,
             )
             model = get_peft_model(model, config)
         else:
@@ -239,6 +321,12 @@ def model_init(
 
 def main():
     cehrgpt_args, data_args, model_args, training_args = parse_runner_args()
+
+    # Set wandb project to CEHRGPT_<task> with task = basename of cohort_folder
+    if data_args.cohort_folder:
+        task_name = os.path.basename(os.path.normpath(data_args.cohort_folder))
+        os.environ["WANDB_PROJECT"] = f"CEHRGPT_{task_name}"
+
     tokenizer = load_pretrained_tokenizer(model_args)
     prepared_ds_path = generate_prepared_ds_path(
         data_args, model_args, data_folder=data_args.cohort_folder
@@ -380,13 +468,29 @@ def main():
     # persist this parameter in case this is overwritten by sample packing
     per_device_eval_batch_size = training_args.per_device_eval_batch_size
 
+    # After hyperparameter search, lr_ratio is set on training_args
+    lr_ratio = getattr(training_args, "lr_ratio", None) or getattr(
+        cehrgpt_args, "lr_ratio", 1.0
+    ) or 1.0
+    simple_head = getattr(cehrgpt_args, "simple_head", False)
+
     if cehrgpt_args.sample_packing:
-        trainer_class = partial(
-            SamplePackingTrainer,
-            max_tokens_per_batch=cehrgpt_args.max_tokens_per_batch,
-            max_position_embeddings=config.max_position_embeddings,
-            negative_sampling_probability=cehrgpt_args.negative_sampling_probability,
-        )
+        if lr_ratio != 1.0:
+            trainer_class = partial(
+                SamplePackingTrainerWithLrRatio,
+                max_tokens_per_batch=cehrgpt_args.max_tokens_per_batch,
+                max_position_embeddings=config.max_position_embeddings,
+                negative_sampling_probability=cehrgpt_args.negative_sampling_probability,
+                lr_ratio=lr_ratio,
+                simple_head=simple_head,
+            )
+        else:
+            trainer_class = partial(
+                SamplePackingTrainer,
+                max_tokens_per_batch=cehrgpt_args.max_tokens_per_batch,
+                max_position_embeddings=config.max_position_embeddings,
+                negative_sampling_probability=cehrgpt_args.negative_sampling_probability,
+            )
         training_args.per_device_train_batch_size = 1
         training_args.per_device_eval_batch_size = 1
         data_collator_fn = partial(
@@ -395,7 +499,14 @@ def main():
             config.max_position_embeddings,
         )
     else:
-        trainer_class = Trainer
+        if lr_ratio != 1.0:
+            trainer_class = partial(
+                ClassificationTrainerWithLrRatio,
+                lr_ratio=lr_ratio,
+                simple_head=simple_head,
+            )
+        else:
+            trainer_class = Trainer
         data_collator_fn = CehrGptDataCollator
 
     # We suppress the additional learning objectives in fine-tuning
@@ -524,7 +635,12 @@ def do_predict(
 
     # Load model and LoRA adapters if applicable
     model = (
-        load_finetuned_model(model_args, training_args, training_args.output_dir)
+        load_finetuned_model(
+            model_args,
+            training_args,
+            training_args.output_dir,
+            simple_head=getattr(cehrgpt_args, "simple_head", False),
+        )
         if not model_args.use_lora
         else load_lora_model(model_args, training_args, cehrgpt_args)
     )
@@ -562,11 +678,12 @@ def do_predict(
             output = model(**batch, output_attentions=False, output_hidden_states=False)
             test_losses.append(output.loss.item())
 
-            # Collect logits and labels for prediction
-            logits = output.logits.float().cpu().numpy().squeeze()
-            if logits.ndim == 0:
-                logits = np.asarray([logits])
-            probabilities = sigmoid(logits)
+            # Collect logits and labels for prediction (logits shape: (N, 2), CEL)
+            logits = output.logits.float().cpu().numpy()
+            if logits.ndim == 1:
+                logits = np.expand_dims(logits, 0)
+            e = np.exp(logits - logits.max(axis=-1, keepdims=True))
+            probabilities = (e / e.sum(axis=-1, keepdims=True))[:, 1]
 
             labels = (
                 batch["classifier_label"].float().cpu().numpy().astype(bool).squeeze()
@@ -614,7 +731,10 @@ def load_lora_model(
 ) -> PeftModel:
     LOG.info("Loading base model from %s", model_args.model_name_or_path)
     model = load_finetuned_model(
-        model_args, training_args, model_args.model_name_or_path
+        model_args,
+        training_args,
+        model_args.model_name_or_path,
+        simple_head=getattr(cehrgpt_args, "simple_head", False),
     )
     # Enable include_values when include_values is set to be False during pre-training
     if model_args.include_values and not model.cehrgpt.include_values:

@@ -119,6 +119,9 @@ def hp_space(trial: optuna.Trial, cehrgpt_args: CehrGPTArguments):
     weight_decays = cehrgpt_args.hyperparameter_weight_decays
     batch_sizes = cehrgpt_args.hyperparameter_batch_sizes
     num_train_epochs = cehrgpt_args.hyperparameter_num_train_epochs
+    lr_ratios = getattr(
+        cehrgpt_args, "hyperparameter_lr_ratios", [1.0]
+    ) or [1.0]
 
     return {
         "learning_rate": get_suggestion(
@@ -133,6 +136,7 @@ def hp_space(trial: optuna.Trial, cehrgpt_args: CehrGPTArguments):
         "num_train_epochs": trial.suggest_categorical(
             "num_train_epochs", num_train_epochs
         ),
+        "lr_ratio": trial.suggest_categorical("lr_ratio", lr_ratios),
     }
 
 
@@ -146,11 +150,15 @@ def create_grid_search_space(cehrgpt_args: CehrGPTArguments):
     Returns:
         Dictionary defining the grid search space
     """
+    lr_ratios = getattr(
+        cehrgpt_args, "hyperparameter_lr_ratios", [1.0]
+    ) or [1.0]
     return {
         "learning_rate": cehrgpt_args.hyperparameter_learning_rates,
         "weight_decay": cehrgpt_args.hyperparameter_weight_decays,
         "per_device_train_batch_size": cehrgpt_args.hyperparameter_batch_sizes,
         "num_train_epochs": cehrgpt_args.hyperparameter_num_train_epochs,
+        "lr_ratio": lr_ratios,
     }
 
 

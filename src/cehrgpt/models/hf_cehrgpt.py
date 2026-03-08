@@ -1774,7 +1774,7 @@ class CehrGptForClassification(CEHRGPTPreTrainedModel):
         self.dropout = nn.Dropout(config.summary_first_dropout)
         self.dense_layer = nn.Linear(config.hidden_size + 1, config.hidden_size // 2)
         self.dense_dropout = nn.Dropout(config.summary_first_dropout)
-        self.classifier = nn.Linear(config.hidden_size // 2, 1)
+        self.classifier = nn.Linear(config.hidden_size // 2, 2)
 
         # Model parallel
         self.model_parallel = False
@@ -1892,15 +1892,113 @@ class CehrGptForClassification(CEHRGPTPreTrainedModel):
 
         loss = None
         if classifier_label is not None:
+            labels = classifier_label.squeeze(-1).long().clamp(0, 1)
             if self.config.class_weights:
-                class_weights = torch.tensor(
-                    [self.config.class_weights[1] / self.config.class_weights[0]],
+                weight = torch.tensor(
+                    self.config.class_weights,
                     dtype=torch.float32,
                 ).to(logits.device)
             else:
-                class_weights = None
-            loss_fct = nn.BCEWithLogitsLoss(pos_weight=class_weights)
-            loss = loss_fct(logits, classifier_label)
+                weight = None
+            loss_fct = CrossEntropyLoss(weight=weight)
+            loss = loss_fct(logits, labels)
+
+        return CehrGptSequenceClassifierOutput(
+            loss=loss,
+            logits=logits,
+            hidden_states=cehrgpt_output.last_hidden_state,
+            attentions=cehrgpt_output.attentions,
+        )
+
+    def parallelize(self, device_map=None):
+        self.cehrgpt.parallelize(device_map=device_map)
+
+    def deparallelize(self):
+        self.cehrgpt.deparallelize()
+
+
+class CehrGptForClassificationSimple(CEHRGPTPreTrainedModel):
+    """Classification head with only a classifier layer (no hidden layer, no age, no dropout)."""
+
+    _keep_in_fp32_modules = ["classifier"]
+
+    def __init__(self, config: CEHRGPTConfig):
+        super().__init__(config)
+
+        self.cehrgpt = CEHRGPT2Model(config)
+        self.classifier = nn.Linear(config.hidden_size, 2)
+
+        # Model parallel
+        self.model_parallel = False
+        self.device_map = None
+        self.gradient_checkpointing = False
+        self.post_init()
+
+    def resize_position_embeddings(self, new_num_position_embeddings: Optional[int]):
+        return self.cehrgpt.resize_position_embeddings(new_num_position_embeddings)
+
+    def forward(
+        self,
+        input_ids: Optional[torch.LongTensor],
+        age_at_index: torch.FloatTensor,
+        classifier_label: Optional[torch.FloatTensor],
+        value_indicators: Optional[torch.BoolTensor] = None,
+        values: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[Tuple[Tuple[torch.Tensor]]] = None,
+        attention_mask: Optional[torch.FloatTensor] = None,
+        head_mask: Optional[torch.FloatTensor] = None,
+        use_cache: Optional[bool] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+        ages: Optional[torch.FloatTensor] = None,
+        epoch_times: Optional[torch.FloatTensor] = None,
+        **kwargs,
+    ) -> CehrGptSequenceClassifierOutput:
+
+        cehrgpt_output = self.cehrgpt(
+            input_ids=input_ids,
+            value_indicators=value_indicators,
+            values=values,
+            past_key_values=past_key_values,
+            attention_mask=attention_mask,
+            head_mask=head_mask,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+            position_ids=ages,
+        )
+
+        if is_sample_pack(attention_mask):
+            features = extract_features_from_packed_sequence(
+                cehrgpt_output.last_hidden_state, attention_mask
+            )
+            assert features.shape[1] == classifier_label.shape[1], (
+                "the length of the features need to be the same as the length of classifier_label. "
+                f"features.shape[1]: {features.shape[1]}, "
+                f"classifier_label.shape[1]: {classifier_label.shape[1]}"
+            )
+            num_samples = age_at_index.shape[1]
+            features = features.view((num_samples, -1))
+            classifier_label = classifier_label.view((num_samples, -1))
+        else:
+            features = cehrgpt_output.last_hidden_state[..., -1, :]
+
+        logits = self.classifier(features)
+
+        loss = None
+        if classifier_label is not None:
+            labels = classifier_label.squeeze(-1).long().clamp(0, 1)
+            if self.config.class_weights:
+                weight = torch.tensor(
+                    self.config.class_weights,
+                    dtype=torch.float32,
+                ).to(logits.device)
+            else:
+                weight = None
+            loss_fct = CrossEntropyLoss(weight=weight)
+            loss = loss_fct(logits, labels)
 
         return CehrGptSequenceClassifierOutput(
             loss=loss,

@@ -251,6 +251,24 @@ class CehrGPTArguments:
         default=None,
         metadata={"help": "The class weights for training"},
     )
+    simple_head: Optional[bool] = dataclasses.field(
+        default=False,
+        metadata={
+            "help": "Use CehrGptForClassificationSimple head (classifier layer only, no age, no dropout) for finetuning."
+        },
+    )
+    lr_ratio: Optional[float] = dataclasses.field(
+        default=1.0,
+        metadata={
+            "help": "Finetuning: head learning rate = learning_rate * lr_ratio. Default 1 (same as backbone)."
+        },
+    )
+    hyperparameter_lr_ratios: Optional[List[float]] = dataclasses.field(
+        default_factory=lambda: [1.0],
+        metadata={
+            "help": "Hyperparameter search: lr_ratio values to try (e.g. 1 2 5 for grid)."
+        },
+    )
     negative_sampling_probability: Optional[float] = dataclasses.field(
         default=None,
         metadata={
