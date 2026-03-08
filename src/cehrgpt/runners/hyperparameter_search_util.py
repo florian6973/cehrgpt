@@ -64,6 +64,19 @@ class OptunaMetricCallback(TrainerCallback):
             metrics.update({"optuna_best_metric": metrics["eval_loss"]})
 
 
+def _finetune_run_name(
+    lr: float,
+    lr_ratio: float,
+    weight_decay: float,
+    batch_size: int,
+    num_epochs: int,
+) -> str:
+    """Build a compact wandb run name from finetuning hyperparameters."""
+    lr_s = f"{lr:.0e}".replace("-", "m").replace(".", "p")
+    wd_s = f"{weight_decay:.0e}".replace("-", "m").replace(".", "p")
+    return f"lr{lr_s}_lrr{int(lr_ratio)}_wd{wd_s}_bs{batch_size}_ep{num_epochs}"
+
+
 def get_suggestion(
     trial,
     hyperparameter_name: str,
@@ -123,20 +136,30 @@ def hp_space(trial: optuna.Trial, cehrgpt_args: CehrGPTArguments):
         cehrgpt_args, "hyperparameter_lr_ratios", [1.0]
     ) or [1.0]
 
+    lr = get_suggestion(
+        trial, "learning_rate", learning_rates, is_grid, use_log_scale
+    )
+    wd = get_suggestion(
+        trial, "weight_decay", weight_decays, is_grid, use_log_scale
+    )
+    bs = trial.suggest_categorical(
+        "per_device_train_batch_size", batch_sizes
+    )
+    ep = trial.suggest_categorical(
+        "num_train_epochs", num_train_epochs
+    )
+    lrr = trial.suggest_categorical("lr_ratio", lr_ratios)
+
+    # Wandb run name from hyperparameters (compact, wandb-safe)
+    run_name = _finetune_run_name(lr=lr, lr_ratio=lrr, weight_decay=wd, batch_size=bs, num_epochs=ep)
+
     return {
-        "learning_rate": get_suggestion(
-            trial, "learning_rate", learning_rates, is_grid, use_log_scale
-        ),
-        "per_device_train_batch_size": trial.suggest_categorical(
-            "per_device_train_batch_size", batch_sizes
-        ),
-        "weight_decay": get_suggestion(
-            trial, "weight_decay", weight_decays, is_grid, use_log_scale
-        ),
-        "num_train_epochs": trial.suggest_categorical(
-            "num_train_epochs", num_train_epochs
-        ),
-        "lr_ratio": trial.suggest_categorical("lr_ratio", lr_ratios),
+        "learning_rate": lr,
+        "per_device_train_batch_size": bs,
+        "weight_decay": wd,
+        "num_train_epochs": ep,
+        "lr_ratio": lrr,
+        "run_name": run_name,
     }
 
 

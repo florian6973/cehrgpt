@@ -61,6 +61,7 @@ from cehrgpt.runners.gpt_runner_util import parse_runner_args
 from cehrgpt.runners.hf_cehrgpt_pretrain_runner import tokenizer_exists
 from cehrgpt.runners.hf_gpt_runner_argument_dataclass import CehrGPTArguments
 from cehrgpt.runners.hyperparameter_search_util import (
+    _finetune_run_name,
     perform_hyperparameter_search,
     sample_dataset,
 )
@@ -473,6 +474,16 @@ def main():
         cehrgpt_args, "lr_ratio", 1.0
     ) or 1.0
     simple_head = getattr(cehrgpt_args, "simple_head", False)
+
+    # Wandb run name from hyperparameters (when not set by hp search)
+    if not getattr(training_args, "run_name", None):
+        training_args.run_name = _finetune_run_name(
+            lr=training_args.learning_rate,
+            lr_ratio=lr_ratio,
+            weight_decay=training_args.weight_decay,
+            batch_size=training_args.per_device_train_batch_size,
+            num_epochs=training_args.num_train_epochs,
+        )
 
     if cehrgpt_args.sample_packing:
         if lr_ratio != 1.0:
