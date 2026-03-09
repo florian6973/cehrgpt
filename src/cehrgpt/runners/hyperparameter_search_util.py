@@ -1,3 +1,4 @@
+import os
 from functools import partial
 from typing import Callable, List, Optional, Tuple, Union
 
@@ -418,53 +419,48 @@ def perform_hyperparameter_search(
         # Set wandb run name before Trainer.train() so wandb.init() picks it up
         run_name = params.get("run_name")
         if run_name:
-            import os
             os.environ["WANDB_NAME"] = str(run_name)
-        trainer = trainer_class(
-            model_init=model_init,
-            data_collator=data_collator,
-            train_dataset=sampled_train,
-            eval_dataset=sampled_val,
-            callbacks=[
-                WandbRunNameCallback(),
-                EarlyStoppingCallback(model_args.early_stopping_patience),
-                OptunaMetricCallback(),
-            ],
-            args=training_args,
-        )
-        trainer.train()
-        # Use Trainer's best eval metric (same as optuna_best_metric from callback)
-        best_metric = getattr(trainer.state, "best_metric", None)
-        if best_metric is None and trainer.state.log_history:
-            for entry in reversed(trainer.state.log_history):
-                if "eval_loss" in entry:
-                    best_metric = entry["eval_loss"]
-                    break
-        if best_metric is None:
-            best_metric = float("inf")
-        return best_metric
+        # Save each trial's checkpoints to output_dir/run-{trial.number} so best run's dir exists after search
+        base_output_dir = training_args.output_dir
+        training_args.output_dir = os.path.join(base_output_dir, f"run-{trial.number}")
+        try:
+            trainer = trainer_class(
+                model_init=model_init,
+                data_collator=data_collator,
+                train_dataset=sampled_train,
+                eval_dataset=sampled_val,
+                callbacks=[
+                    WandbRunNameCallback(),
+                    EarlyStoppingCallback(model_args.early_stopping_patience),
+                    OptunaMetricCallback(),
+                ],
+                args=training_args,
+            )
+            trainer.train()
+            # Use Trainer's best eval metric (same as optuna_best_metric from callback)
+            best_metric = getattr(trainer.state, "best_metric", None)
+            if best_metric is None and trainer.state.log_history:
+                for entry in reversed(trainer.state.log_history):
+                    if "eval_loss" in entry:
+                        best_metric = entry["eval_loss"]
+                        break
+            if best_metric is None:
+                best_metric = float("inf")
+            return best_metric
+        finally:
+            training_args.output_dir = base_output_dir
+            # Finish wandb run so the next trial gets its own run (one run per trial)
+            try:
+                import wandb
+                if wandb.run is not None:
+                    wandb.finish()
+            except Exception:
+                pass
 
     study = optuna.create_study(direction="minimize", sampler=sampler)
-    optuna_callbacks = []
-    try:
-        from optuna.integration.wandb import WeightsAndBiasesCallback
-        import os
-        wandb_kwargs = {"project": os.environ.get("WANDB_PROJECT", "CEHRGPT")}
-        optuna_callbacks.append(
-            WeightsAndBiasesCallback(
-                metric_name="optuna_best_metric",
-                wandb_kwargs=wandb_kwargs,
-                as_multirun=False,
-            )
-        )
-        LOG.info("Using Optuna WeightsAndBiasesCallback for study-level logging")
-    except ImportError:
-        pass
-
     study.optimize(
         objective,
         n_trials=cehrgpt_args.n_trials,
-        callbacks=optuna_callbacks,
     )
 
     best_trial = study.best_trial

@@ -1,3 +1,4 @@
+import os
 from typing import Dict, List
 
 from transformers import PretrainedConfig
@@ -236,3 +237,24 @@ class CEHRGPTConfig(PretrainedConfig):
     @property
     def lab_token_exists(self) -> bool:
         return self.lab_token_ids is not None and len(self.lab_token_ids) > 0
+
+    def to_dict(self):
+        """Exclude large _token_to_time_token_mapping from dict to avoid wandb serialization warning."""
+        d = super().to_dict()
+        d.pop("_token_to_time_token_mapping", None)
+        return d
+
+    def save_pretrained(self, save_directory, **kwargs):
+        """Save config including _token_to_time_token_mapping (excluded from to_dict for logging)."""
+        from transformers.utils import CONFIG_NAME
+
+        os.makedirs(save_directory, exist_ok=True)
+        config_dict = self.to_dict()
+        config_dict["_token_to_time_token_mapping"] = getattr(
+            self, "_token_to_time_token_mapping", {}
+        )
+        output_config_file = os.path.join(save_directory, CONFIG_NAME)
+        import json
+
+        with open(output_config_file, "w", encoding="utf-8") as writer:
+            writer.write(json.dumps(config_dict, indent=2, sort_keys=True) + "\n")
