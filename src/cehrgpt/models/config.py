@@ -239,13 +239,14 @@ class CEHRGPTConfig(PretrainedConfig):
         return self.lab_token_ids is not None and len(self.lab_token_ids) > 0
 
     def to_dict(self):
-        """Exclude large _token_to_time_token_mapping from dict to avoid wandb serialization warning."""
+        """Exclude large lists from dict to avoid wandb serialization warning (~194KB)."""
         d = super().to_dict()
         d.pop("_token_to_time_token_mapping", None)
+        d.pop("pretrained_token_ids", None)  # list of token ids, can be 24k+ entries
         return d
 
     def save_pretrained(self, save_directory, **kwargs):
-        """Save config including _token_to_time_token_mapping (excluded from to_dict for logging)."""
+        """Save config including keys excluded from to_dict (for logging)."""
         from transformers.utils import CONFIG_NAME
 
         os.makedirs(save_directory, exist_ok=True)
@@ -253,6 +254,8 @@ class CEHRGPTConfig(PretrainedConfig):
         config_dict["_token_to_time_token_mapping"] = getattr(
             self, "_token_to_time_token_mapping", {}
         )
+        if getattr(self, "pretrained_token_ids", None):
+            config_dict["pretrained_token_ids"] = self.pretrained_token_ids
         output_config_file = os.path.join(save_directory, CONFIG_NAME)
         import json
 

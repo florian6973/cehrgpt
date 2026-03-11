@@ -1,6 +1,6 @@
 import os
 from datetime import datetime
-from typing import Dict, List, Optional, Union, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import polars as pl
@@ -330,6 +330,147 @@ def create_dataset_splits(
     return train_set, validation_set, test_set
 
 
+# Approximate bytes per output row element (int32 + string overhead for concept_ids).
+# Used to estimate which writer batches could exceed Arrow's ~2GB limit.
+_BYTES_PER_ELEMENT_ESTIMATE = 8
+_ARROW_LIMIT_BYTES = 2 * (1024**3)
+
+
+def inspect_cohort_sequence_sizes(
+    data_args: DataTrainingArguments,
+    cehrgpt_args: CehrGPTArguments,
+    writer_batch_size: int = 1000,
+    iter_batch_size: int = 500,
+) -> Dict[str, Any]:
+    """
+    Inspect per-row and per-writer-batch sizes for the cohort map step without running it.
+
+    Use this to see which rows or writer batches could trigger the Arrow 2GB overflow.
+    Loads the same cohort and filtered tokenized dataset as extract_cohort_sequences,
+    then iterates over the data to compute:
+    - Per-split: total output rows, sequence length distribution, num_outputs per person.
+    - Top input rows (by output footprint) that contribute most to size.
+    - Simulated writer batches: if we wrote `writer_batch_size` output rows at a time,
+      which batches would exceed the Arrow limit (worst-case ordering).
+
+    Returns:
+        Dict with keys: "per_split", "top_footprint_rows", "writer_batch_simulation".
+    """
+    cohort = pl.read_parquet(os.path.join(data_args.cohort_folder, "*.parquet"))
+    if data_args.is_data_in_meds:
+        cohort = cohort.rename(
+            mapping={
+                "prediction_time": "index_date",
+                "subject_id": "person_id",
+                "boolean_value": "label",
+            }
+        )
+    all_person_ids = set(cohort["person_id"].unique().to_list())
+    person_index_date_agg = cohort.group_by("person_id").agg(
+        pl.struct("index_date", "label").alias("index_date_label")
+    )
+    person_index_date_map: Dict[int, int] = {
+        pid: len(rows)
+        for pid, rows in zip(
+            person_index_date_agg["person_id"].to_list(),
+            person_index_date_agg["index_date_label"].to_list(),
+        )
+    }
+
+    tokenized_dataset = load_from_disk(cehrgpt_args.tokenized_full_dataset_path)
+    filtered_tokenized_dataset = tokenized_dataset.filter(
+        lambda batch: [person_id in all_person_ids for person_id in batch["person_id"]],
+        batched=True,
+        batch_size=data_args.preprocessing_batch_size,
+        num_proc=data_args.preprocessing_num_workers,
+    )
+
+    per_split: Dict[str, Dict[str, Any]] = {}
+    all_output_row_lengths: List[int] = []
+    footprint_rows: List[Tuple[Union[int, str], int, int, int]] = []  # (person_id, seq_len, num_outputs, footprint)
+
+    for split_name, ds in filtered_tokenized_dataset.items():
+        output_row_lengths: List[int] = []
+        seq_lens: List[int] = []
+        num_outputs_list: List[int] = []
+        for batch in ds.iter(batch_size=iter_batch_size):
+            person_ids = batch["person_id"]
+            # concept_ids or input_ids: list of lists per row
+            seq_lens_batch = [len(batch["input_ids"][i]) for i in range(len(person_ids))]
+            for i in range(len(person_ids)):
+                pid = person_ids[i]
+                slen = seq_lens_batch[i]
+                nout = person_index_date_map.get(pid, 0)
+                seq_lens.append(slen)
+                num_outputs_list.append(nout)
+                for _ in range(nout):
+                    output_row_lengths.append(slen)
+                footprint = nout * slen
+                footprint_rows.append((pid, slen, nout, footprint))
+                all_output_row_lengths.extend([slen] * nout)
+
+        n_out = len(output_row_lengths)
+        if n_out == 0:
+            per_split[split_name] = {"num_output_rows": 0, "num_input_rows": 0}
+            continue
+        arr = np.array(output_row_lengths)
+        per_split[split_name] = {
+            "num_output_rows": n_out,
+            "num_input_rows": len(seq_lens),
+            "seq_len_min": int(np.min(seq_lens)),
+            "seq_len_max": int(np.max(seq_lens)),
+            "seq_len_p50": int(np.percentile(seq_lens, 50)),
+            "seq_len_p99": int(np.percentile(seq_lens, 99)),
+            "num_outputs_per_input_max": int(np.max(num_outputs_list)),
+            "num_outputs_per_input_p99": int(np.percentile(num_outputs_list, 99)),
+            "total_elements": int(np.sum(arr)),
+            "estimated_total_bytes": int(np.sum(arr) * _BYTES_PER_ELEMENT_ESTIMATE),
+        }
+
+    # Top rows by output footprint (num_outputs * seq_len)
+    footprint_rows.sort(key=lambda x: x[3], reverse=True)
+    top_footprint_rows = [
+        {"person_id": r[0], "seq_len": r[1], "num_outputs": r[2], "footprint_elements": r[3]}
+        for r in footprint_rows[:50]
+    ]
+
+    # Simulate writer batches: sort output row sizes descending (worst-case order), chunk, sum
+    all_output_row_lengths.sort(reverse=True)
+    writer_batch_sums_elements: List[int] = []
+    writer_batch_sums_bytes: List[int] = []
+    for start in range(0, len(all_output_row_lengths), writer_batch_size):
+        chunk = all_output_row_lengths[start : start + writer_batch_size]
+        s = sum(chunk)
+        writer_batch_sums_elements.append(s)
+        writer_batch_sums_bytes.append(s * _BYTES_PER_ELEMENT_ESTIMATE)
+    overflow_count = sum(1 for b in writer_batch_sums_bytes if b >= _ARROW_LIMIT_BYTES)
+    writer_batch_simulation = {
+        "writer_batch_size": writer_batch_size,
+        "num_writer_batches": len(writer_batch_sums_elements),
+        "max_batch_elements": max(writer_batch_sums_elements) if writer_batch_sums_elements else 0,
+        "max_batch_estimated_bytes": max(writer_batch_sums_bytes) if writer_batch_sums_bytes else 0,
+        "arrow_limit_bytes": _ARROW_LIMIT_BYTES,
+        "num_batches_over_limit": overflow_count,
+        "safe_writer_batch_size_hint": None,
+    }
+    if writer_batch_sums_elements:
+        max_b = max(writer_batch_sums_bytes)
+        if max_b >= _ARROW_LIMIT_BYTES and writer_batch_size > 1:
+            # Suggest a smaller writer_batch_size so max batch stays under limit
+            target = _ARROW_LIMIT_BYTES // 2
+            max_per_row = max(all_output_row_lengths) * _BYTES_PER_ELEMENT_ESTIMATE
+            suggested = max(1, int(target / max_per_row)) if max_per_row else 1
+            writer_batch_simulation["safe_writer_batch_size_hint"] = suggested
+
+    result = {
+        "per_split": per_split,
+        "top_footprint_rows": top_footprint_rows,
+        "writer_batch_simulation": writer_batch_simulation,
+    }
+    LOG.info("inspect_cohort_sequence_sizes result: %s", result)
+    return result
+
+
 def extract_cohort_sequences(
     data_args: DataTrainingArguments,
     cehrgpt_args: CehrGPTArguments,
@@ -415,6 +556,8 @@ def extract_cohort_sequences(
             f"There are {len(missing_person_ids)} missing in the tokenized dataset. "
             f"The list contains: {missing_person_ids}"
         )
+    # Use a small writer_batch_size to avoid Arrow 2GB/offset overflow when writing
+    # list columns (e.g. concept_ids, input_ids) from the map output.
     processed_dataset = filtered_tokenized_dataset.map(
         ExtractTokenizedSequenceDataMapping(
             person_index_date_map, data_args.observation_window
@@ -423,5 +566,6 @@ def extract_cohort_sequences(
         batch_size=data_args.preprocessing_batch_size,
         num_proc=data_args.preprocessing_num_workers,
         remove_columns=filtered_tokenized_dataset["train"].column_names,
+        writer_batch_size=100,
     )
     return processed_dataset
