@@ -365,7 +365,8 @@ def extract_cohort_sequences(
         RuntimeError: If any `person_id` in the cohort is missing from the tokenized dataset.
     """
 
-    cohort = pl.read_parquet(os.path.join(data_args.cohort_folder, "*.parquet"))
+    cohort = pl.scan_parquet(os.path.join(data_args.cohort_folder, "*.parquet"),
+                                 cast_options=pl.ScanCastOptions(datetime_cast="nanosecond-downcast")).collect()
     if data_args.is_data_in_meds:
         cohort = cohort.rename(
             mapping={
@@ -423,5 +424,6 @@ def extract_cohort_sequences(
         batch_size=data_args.preprocessing_batch_size,
         num_proc=data_args.preprocessing_num_workers,
         remove_columns=filtered_tokenized_dataset["train"].column_names,
+        writer_batch_size=10,
     )
     return processed_dataset
